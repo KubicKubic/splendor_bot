@@ -1,5 +1,6 @@
 """Persistent O(N) checkpoint Elo ladder plus 2/3/4-player diagnostics."""
 import argparse
+from dataclasses import asdict
 import hashlib
 import json
 from pathlib import Path
@@ -68,10 +69,14 @@ def main():
             time.sleep(cfg['poll_seconds'])
             continue
         params, train_cfg = load(checkpoint)
-        if not train_cfg.mixed_players or train_cfg.width != 800 or train_cfg.gamma != 1.:
-            raise ValueError(f'Unexpected mixed-training configuration in {checkpoint}')
+        expected = cfg.get('expected_training', {})
+        actual = asdict(train_cfg)
+        mismatches = {key: (actual.get(key), value) for key, value in expected.items()
+                      if actual.get(key) != value}
+        if not train_cfg.mixed_players or train_cfg.gamma != 1. or mismatches:
+            raise ValueError(f'Unexpected mixed-training configuration in {checkpoint}: {mismatches}')
         params_by_update[update] = params
-        models.append(dict(name=f'mixed_{update:06d}', checkpoint=str(checkpoint),
+        models.append(dict(name=f'{cfg.get("model_prefix", "mixed")}_{update:06d}', checkpoint=str(checkpoint),
                            training_decisions=update * train_cfg.envs * train_cfg.horizon,
                            sha256=sha256(checkpoint)))
 
