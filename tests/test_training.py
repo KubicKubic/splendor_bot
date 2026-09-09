@@ -56,6 +56,23 @@ def test_mixed_player_update_and_widening():
     np.testing.assert_array_equal(result[2].nplayers, expected_counts)
 
 
+def test_resnet_checkpoint_roundtrip(tmp_path):
+    cfg = Config(width=48, residual_blocks=6, residual_taper=True)
+    state = env.reset(jax.random.PRNGKey(35))
+    params = network.init(jax.random.PRNGKey(36), env.observe(state).shape[0], cfg.width,
+                          cfg.residual_blocks, cfg.residual_taper)
+    logits, values = network.apply(params, env.observe(state), env.legal_mask(state))
+    path = tmp_path / 'resnet_policy.npz'
+    save(path, params, cfg, 0)
+    restored, restored_cfg = load(path)
+    restored_logits, restored_values = network.apply(restored, env.observe(state), env.legal_mask(state))
+    assert restored_cfg == cfg
+    assert logits.shape == (env.N_ACTIONS,) and values.shape == (4,)
+    assert network.parameter_count(params) > 0
+    np.testing.assert_array_equal(logits, restored_logits)
+    np.testing.assert_array_equal(values, restored_values)
+
+
 def test_site_adapter_and_complete_actions(tmp_path):
     cfg = Config(width=32)
     s = env.reset(jax.random.PRNGKey(5))

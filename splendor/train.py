@@ -26,6 +26,8 @@ class Config:
     epochs: int = 3
     minibatches: int = 32
     width: int = 256
+    residual_blocks: int = 0
+    residual_taper: bool = False
     players: int = 2
     mixed_players: bool = False
     seed: int = 41
@@ -148,7 +150,12 @@ def make_update(cfg, optimizer):
 
 def save(path, params, cfg, update, opt_state=None, states=None, key=None):
     """Atomic NPZ with no pickle. Full state supports exact uninterrupted resume."""
-    data = {f'layer_{i}_{name}': np.asarray(value) for i, layer in enumerate(params) for name, value in layer.items()}
+    if isinstance(params, list):
+        data = {f'layer_{i}_{name}': np.asarray(value)
+                for i, layer in enumerate(params) for name, value in layer.items()}
+    else:
+        data = {f'param_{i}': np.asarray(value) for i, value in enumerate(jax.tree.leaves(params))}
+        data['param_format'] = np.array('pytree-v2')
     data['config'] = np.array(json.dumps(asdict(cfg)))
     data['update'] = np.array(update)
     if opt_state is not None:
@@ -166,7 +173,14 @@ def save(path, params, cfg, update, opt_state=None, states=None, key=None):
 def load(path):
     with np.load(path, allow_pickle=False) as data:
         cfg = Config(**json.loads(str(data['config'])))
-        params = [{name: jnp.asarray(data[f'layer_{i}_{name}']) for name in ('w', 'b')} for i in range(3)]
+        if 'param_format' in data:
+            obs_dim = env.observe(env.reset(jax.random.PRNGKey(0), cfg.players)).shape[0]
+            template = network.init(jax.random.PRNGKey(0), obs_dim, cfg.width, cfg.residual_blocks,
+                                    cfg.residual_taper)
+            leaves, tree = jax.tree.flatten(template)
+            params = jax.tree.unflatten(tree, [jnp.asarray(data[f'param_{i}']) for i in range(len(leaves))])
+        else:
+            params = [{name: jnp.asarray(data[f'layer_{i}_{name}']) for name in ('w', 'b')} for i in range(3)]
     return params, cfg
 
 
@@ -183,7 +197,7 @@ def main():
     if args.resume and args.warm_start:
         parser.error('--resume and --warm-start are mutually exclusive')
     cfg = Config(**{name: getattr(args, name) for name in Config.__dataclass_fields__})
-    if any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'max_turns', 'save_every', 'log_every')):
+    if any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'max_turns', 'save_every', 'log_every')) or cfg.residual_blocks < 0:
         parser.error('Batch, iteration, model, and interval sizes must be positive')
     if cfg.players not in (2, 3, 4) or cfg.envs * cfg.horizon % cfg.minibatches:
         parser.error('players must be 2..4; envs*horizon must divide by minibatches')
@@ -203,12 +217,15 @@ def main():
     player_counts = jnp.where(cfg.mixed_players, 2 + jnp.arange(cfg.envs) % 3,
                               jnp.full(cfg.envs, cfg.players))
     states = jax.vmap(env.reset)(jax.random.split(ke, cfg.envs), player_counts)
-    params = network.init(kp, env.observe(jax.tree.map(lambda x: x[0], states)).shape[0], cfg.width)
+    params = network.init(kp, env.observe(jax.tree.map(lambda x: x[0], states)).shape[0], cfg.width,
+                          cfg.residual_blocks, cfg.residual_taper)
     if args.warm_start:
         params, parent_cfg = load(args.warm_start)
         player_compatible = (parent_cfg.players == cfg.players or cfg.mixed_players)
-        if not player_compatible or parent_cfg.width > cfg.width:
-            raise ValueError('Warm-start requires a compatible player count and cannot shrink width')
+        if (not player_compatible or parent_cfg.width > cfg.width
+                or parent_cfg.residual_blocks != cfg.residual_blocks
+                or parent_cfg.residual_taper != cfg.residual_taper):
+            raise ValueError('Warm-start requires compatible players, architecture, and non-shrinking width')
         if parent_cfg.width < cfg.width:
             params = network.widen(params, cfg.width, jax.random.fold_in(kp, 800))
     optimizer = optax.chain(optax.clip_by_global_norm(.5), optax.adam(cfg.lr, eps=1e-5))
