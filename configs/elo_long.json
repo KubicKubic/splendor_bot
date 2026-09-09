@@ -1,0 +1,17 @@
+{
+  "anchor": "before_long_1000",
+  "seed": 20260921,
+  "games": 2048,
+  "max_decisions": 4000,
+  "bf16": true,
+  "models": [
+    {"name": "initial_ppo_500", "checkpoint": "runs/a100_2p/policy_000500.npz", "training_decisions": 131072000},
+    {"name": "fast_500", "checkpoint": "runs/a100_2p_fast/policy_000500.npz", "training_decisions": 655360000},
+    {"name": "before_long_1000", "checkpoint": "runs/a100_2p_fast/policy_001000.npz", "training_decisions": 1179648000},
+    {"name": "long_2000", "checkpoint": "runs/a100_2p_long/policy_002000.npz", "training_decisions": 2228224000},
+    {"name": "long_3000", "checkpoint": "runs/a100_2p_long/policy_003000.npz", "training_decisions": 3276800000},
+    {"name": "long_4000", "checkpoint": "runs/a100_2p_long/policy_004000.npz", "training_decisions": 4325376000},
+    {"name": "long_5000", "checkpoint": "runs/a100_2p_long/policy_005000.npz", "training_decisions": 5373952000},
+    {"name": "long_6000", "checkpoint": "runs/a100_2p_long/policy_006000.npz", "training_decisions": 6422528000}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "anchor": "before_long_1000",
+  "seed": 20260921,
+  "games": 2048,
+  "max_decisions": 4000,
+  "bf16": true,
+  "models": [
+    {"name": "initial_ppo_500", "checkpoint": "runs/a100_2p/policy_000500.npz", "training_decisions": 131072000},
+    {"name": "fast_500", "checkpoint": "runs/a100_2p_fast/policy_000500.npz", "training_decisions": 655360000},
+    {"name": "before_long_1000", "checkpoint": "runs/a100_2p_fast/policy_001000.npz", "training_decisions": 1179648000}
+  ]
+}

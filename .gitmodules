@@ -1,0 +1,3 @@
+[submodule "vendor/edwadli_splendor"]
+	path = vendor/edwadli_splendor
+	url = https://github.com/edwadli/splendor-ai.git

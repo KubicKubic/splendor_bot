@@ -1,0 +1,14 @@
+{
+  "run_dir": "runs/a100_mixed_1m",
+  "first_update": 500,
+  "last_update": 20000,
+  "interval": 500,
+  "lag": 4,
+  "games": 1024,
+  "heuristic_games": 384,
+  "max_decisions": 4000,
+  "seed": 20261301,
+  "bf16": true,
+  "bootstrap": 300,
+  "poll_seconds": 10
+}

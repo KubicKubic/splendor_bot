@@ -1,0 +1,4 @@
+jax[cuda12]==0.4.35
+optax==0.2.4
+numpy>=1.24,<3
+pytest>=8

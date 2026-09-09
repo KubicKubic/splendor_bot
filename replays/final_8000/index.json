@@ -1,0 +1,29 @@
+[
+  {
+    "file": "game_1_bot-seat0_seed101.html",
+    "mode": "bot-seat0",
+    "seed": 101,
+    "turns": 54,
+    "winners": [
+      0
+    ]
+  },
+  {
+    "file": "game_2_bot-seat1_seed202.html",
+    "mode": "bot-seat1",
+    "seed": 202,
+    "turns": 60,
+    "winners": [
+      1
+    ]
+  },
+  {
+    "file": "game_3_self_seed303.html",
+    "mode": "self",
+    "seed": 303,
+    "turns": 56,
+    "winners": [
+      0
+    ]
+  }
+]
