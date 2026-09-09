@@ -109,9 +109,10 @@ def make_update(cfg, optimizer):
             logprob = jnp.take_along_axis(logprobs, batch['actions'][:, None], -1)[:, 0]
             ratio = jnp.exp(logprob - batch['logprob'])
             policy_loss = -jnp.minimum(ratio * batch['adv'], jnp.clip(ratio, .8, 1.2) * batch['adv']).mean()
-            clipped = batch['value'] + jnp.clip(values - batch['value'], -.2, .2)
-            value_mse = jnp.maximum((values - batch['target']) ** 2,
-                                    (clipped - batch['target']) ** 2)
+            # Value learning deliberately uses the plain per-seat MSE, without
+            # PPO value clipping, so the dedicated value head receives the full
+            # regression signal from terminal zero-sum outcomes.
+            value_mse = (values - batch['target']) ** 2
             active = jnp.arange(4) < batch['nplayers'][:, None]
             value_mse = (value_mse * active).sum() / active.sum()
             entropy = -(jax.nn.softmax(logits) * logprobs).sum(-1).mean()
