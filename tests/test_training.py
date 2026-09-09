@@ -57,12 +57,14 @@ def test_mixed_player_update_and_widening():
 
 
 def test_resnet_checkpoint_roundtrip(tmp_path):
-    cfg = Config(width=48, residual_blocks=6, residual_taper=True, value_head_width=32,
+    cfg = Config(width=48, residual_blocks=6, residual_taper=True, residual_stage_widths='48,30,18',
+                 policy_head_width=36, policy_head_layers=2, value_head_width=32,
                  value_head_layers=2, value_loss_coef=1.)
     state = env.reset(jax.random.PRNGKey(35))
     params = network.init(jax.random.PRNGKey(36), env.observe(state).shape[0], cfg.width,
                           cfg.residual_blocks, cfg.residual_taper, cfg.value_head_width,
-                          cfg.value_head_layers)
+                          cfg.value_head_layers, cfg.policy_head_width, cfg.policy_head_layers,
+                          cfg.residual_stage_widths)
     logits, values = network.apply(params, env.observe(state), env.legal_mask(state))
     path = tmp_path / 'resnet_policy.npz'
     save(path, params, cfg, 0)

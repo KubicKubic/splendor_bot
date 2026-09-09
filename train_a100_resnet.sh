@@ -2,9 +2,10 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 # Deep tapered residual policy/value trunk: six residual blocks / 12 main
-# transforms, with widths 460 -> 316 -> 201.  A dedicated two-layer 384-wide
-# value MLP provides four-seat MSE estimates; total size is ~2.0M parameters.
+# transforms, with widths 480 -> 270 -> 150.  Dedicated two-layer policy and
+# value heads have comparable capacity (352 vs 316) while policy is larger.
 exec bash train_a100.sh \
   --envs 4096 --horizon 128 --epochs 3 --minibatches 32 \
-  --width 460 --residual-blocks 6 --residual-taper --value-head-width 384 --value-head-layers 2 \
+  --width 480 --residual-blocks 6 --residual-taper --residual-stage-widths 480,270,150 \
+  --policy-head-width 352 --policy-head-layers 2 --value-head-width 316 --value-head-layers 2 \
   --value-loss-coef 1.0 --players 4 --mixed-players --bf16 --gamma 1.0 --lr 0.0001 "$@"

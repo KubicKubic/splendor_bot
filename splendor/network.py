@@ -11,7 +11,8 @@ def _linear(key, fan_in, fan_out, scale=1.):
 
 
 def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False,
-         value_head_width=0, value_head_layers=0):
+         value_head_width=0, value_head_layers=0, policy_head_width=0,
+         policy_head_layers=0, residual_stage_widths=''):
     """Initialize the legacy two-hidden-layer MLP or a pre-activation residual MLP.
 
     Each residual block contains two affine transforms.  Tapered networks split
@@ -21,17 +22,22 @@ def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False,
     if residual_blocks < 0:
         raise ValueError('residual_blocks must be non-negative')
     if residual_blocks:
-        if bool(value_head_width) != bool(value_head_layers):
-            raise ValueError('value_head_width and value_head_layers must both be positive or both be zero')
+        if (bool(value_head_width) != bool(value_head_layers)
+                or bool(policy_head_width) != bool(policy_head_layers)):
+            raise ValueError('head widths and depths must both be positive or both be zero')
         if residual_taper:
             if residual_blocks % 3:
                 raise ValueError('tapered residual networks need a multiple of three blocks')
-            stage_widths = (width, width * 11 // 16, width * 7 // 16)
+            stage_widths = tuple(int(x) for x in residual_stage_widths.split(',')) if residual_stage_widths else (
+                width, width * 11 // 16, width * 7 // 16)
+            if len(stage_widths) != 3 or min(stage_widths) <= 0 or stage_widths[0] != width:
+                raise ValueError('residual_stage_widths must be three positive widths beginning with width')
             block_widths = sum(([stage] * (residual_blocks // 3) for stage in stage_widths), [])
         else:
             block_widths = [width] * residual_blocks
-        extra_value_layers = value_head_layers + 1 if value_head_width else 0
-        keys = jax.random.split(key, 2 + 3 * residual_blocks + extra_value_layers)
+        policy_keys = policy_head_layers + 1 if policy_head_width else 1
+        value_keys = value_head_layers + 1 if value_head_width else 0
+        keys = jax.random.split(key, 1 + 3 * residual_blocks + policy_keys + value_keys)
         cursor = 0
         stem = _linear(keys[cursor], obs_dim, width); cursor += 1
         blocks = []
@@ -46,20 +52,35 @@ def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False,
             blocks.append(block)
             in_width = out_width
             cursor += 3
-        if not value_head_width:
+        if not value_head_width and not policy_head_width:
             head = _linear(keys[cursor], in_width, N_ACTIONS + 4)
             head['w'] = head['w'].at[:, :N_ACTIONS].multiply(.01)
             head['w'] = head['w'].at[:, N_ACTIONS:].multiply(.5)
             return dict(stem=stem, blocks=blocks, head=head)
-        policy_head = _linear(keys[cursor], in_width, N_ACTIONS); cursor += 1
-        policy_head['w'] = policy_head['w'] * .01
+        if policy_head_width:
+            policy_layers = []
+            policy_width = in_width
+            for _ in range(policy_head_layers):
+                policy_layers.append(_linear(keys[cursor], policy_width, policy_head_width))
+                cursor += 1
+                policy_width = policy_head_width
+            policy_out = _linear(keys[cursor], policy_width, N_ACTIONS); cursor += 1
+            policy_out['w'] = policy_out['w'] * .01
+        else:
+            policy_head = _linear(keys[cursor], in_width, N_ACTIONS); cursor += 1
+            policy_head['w'] = policy_head['w'] * .01
         value_layers = []
         for _ in range(value_head_layers):
             value_layers.append(_linear(keys[cursor], in_width, value_head_width))
             cursor += 1
             in_width = value_head_width
-        return dict(stem=stem, blocks=blocks, policy_head=policy_head,
-                    value_layers=value_layers, value_out=_linear(keys[cursor], in_width, 4, scale=.5))
+        result = dict(stem=stem, blocks=blocks, value_layers=value_layers,
+                      value_out=_linear(keys[cursor], in_width, 4, scale=.5))
+        if policy_head_width:
+            result.update(policy_layers=policy_layers, policy_out=policy_out)
+        else:
+            result['policy_head'] = policy_head
+        return result
     sizes = [obs_dim, width, width, N_ACTIONS + 4]
     keys = jax.random.split(key, 3)
     result = []
@@ -89,8 +110,15 @@ def apply(params, obs, mask, bf16=False):
             layer = params['head']
             out = (x @ layer['w'].astype(dtype) + layer['b'].astype(dtype)).astype(jnp.float32)
             return jnp.where(mask, out[..., :N_ACTIONS], -1e9), out[..., N_ACTIONS:]
-        policy = params['policy_head']
-        logits = (x @ policy['w'].astype(dtype) + policy['b'].astype(dtype)).astype(jnp.float32)
+        if 'policy_layers' in params:
+            policy_x = x
+            for layer in params['policy_layers']:
+                policy_x = jax.nn.relu(policy_x @ layer['w'].astype(dtype) + layer['b'].astype(dtype))
+            policy = params['policy_out']
+            logits = (policy_x @ policy['w'].astype(dtype) + policy['b'].astype(dtype)).astype(jnp.float32)
+        else:
+            policy = params['policy_head']
+            logits = (x @ policy['w'].astype(dtype) + policy['b'].astype(dtype)).astype(jnp.float32)
         value_x = x
         for layer in params['value_layers']:
             value_x = jax.nn.relu(value_x @ layer['w'].astype(dtype) + layer['b'].astype(dtype))

@@ -30,6 +30,9 @@ class Config:
     residual_taper: bool = False
     value_head_width: int = 0
     value_head_layers: int = 0
+    policy_head_width: int = 0
+    policy_head_layers: int = 0
+    residual_stage_widths: str = ''
     players: int = 2
     mixed_players: bool = False
     seed: int = 41
@@ -180,7 +183,8 @@ def load(path):
         if 'param_format' in data:
             obs_dim = env.observe(env.reset(jax.random.PRNGKey(0), cfg.players)).shape[0]
             template = network.init(jax.random.PRNGKey(0), obs_dim, cfg.width, cfg.residual_blocks,
-                                    cfg.residual_taper, cfg.value_head_width, cfg.value_head_layers)
+                                    cfg.residual_taper, cfg.value_head_width, cfg.value_head_layers,
+                                    cfg.policy_head_width, cfg.policy_head_layers, cfg.residual_stage_widths)
             leaves, tree = jax.tree.flatten(template)
             params = jax.tree.unflatten(tree, [jnp.asarray(data[f'param_{i}']) for i in range(len(leaves))])
         else:
@@ -203,7 +207,9 @@ def main():
     cfg = Config(**{name: getattr(args, name) for name in Config.__dataclass_fields__})
     if (any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'max_turns', 'save_every', 'log_every'))
             or cfg.residual_blocks < 0 or cfg.value_head_width < 0 or cfg.value_head_layers < 0
-            or cfg.value_loss_coef < 0 or bool(cfg.value_head_width) != bool(cfg.value_head_layers)):
+            or cfg.policy_head_width < 0 or cfg.policy_head_layers < 0 or cfg.value_loss_coef < 0
+            or bool(cfg.value_head_width) != bool(cfg.value_head_layers)
+            or bool(cfg.policy_head_width) != bool(cfg.policy_head_layers)):
         parser.error('Batch, iteration, model, and interval sizes must be positive')
     if cfg.players not in (2, 3, 4) or cfg.envs * cfg.horizon % cfg.minibatches:
         parser.error('players must be 2..4; envs*horizon must divide by minibatches')
@@ -225,7 +231,8 @@ def main():
     states = jax.vmap(env.reset)(jax.random.split(ke, cfg.envs), player_counts)
     params = network.init(kp, env.observe(jax.tree.map(lambda x: x[0], states)).shape[0], cfg.width,
                           cfg.residual_blocks, cfg.residual_taper, cfg.value_head_width,
-                          cfg.value_head_layers)
+                          cfg.value_head_layers, cfg.policy_head_width, cfg.policy_head_layers,
+                          cfg.residual_stage_widths)
     if args.warm_start:
         params, parent_cfg = load(args.warm_start)
         player_compatible = (parent_cfg.players == cfg.players or cfg.mixed_players)
@@ -233,7 +240,10 @@ def main():
                 or parent_cfg.residual_blocks != cfg.residual_blocks
                 or parent_cfg.residual_taper != cfg.residual_taper
                 or parent_cfg.value_head_width != cfg.value_head_width
-                or parent_cfg.value_head_layers != cfg.value_head_layers):
+                or parent_cfg.value_head_layers != cfg.value_head_layers
+                or parent_cfg.policy_head_width != cfg.policy_head_width
+                or parent_cfg.policy_head_layers != cfg.policy_head_layers
+                or parent_cfg.residual_stage_widths != cfg.residual_stage_widths):
             raise ValueError('Warm-start requires compatible players, architecture, and non-shrinking width')
         if parent_cfg.width < cfg.width:
             params = network.widen(params, cfg.width, jax.random.fold_in(kp, 800))
