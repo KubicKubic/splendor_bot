@@ -10,7 +10,8 @@ def _linear(key, fan_in, fan_out, scale=1.):
                 b=jnp.zeros(fan_out))
 
 
-def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False):
+def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False,
+         value_head_width=0, value_head_layers=0):
     """Initialize the legacy two-hidden-layer MLP or a pre-activation residual MLP.
 
     Each residual block contains two affine transforms.  Tapered networks split
@@ -20,6 +21,8 @@ def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False):
     if residual_blocks < 0:
         raise ValueError('residual_blocks must be non-negative')
     if residual_blocks:
+        if bool(value_head_width) != bool(value_head_layers):
+            raise ValueError('value_head_width and value_head_layers must both be positive or both be zero')
         if residual_taper:
             if residual_blocks % 3:
                 raise ValueError('tapered residual networks need a multiple of three blocks')
@@ -27,23 +30,36 @@ def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False):
             block_widths = sum(([stage] * (residual_blocks // 3) for stage in stage_widths), [])
         else:
             block_widths = [width] * residual_blocks
-        keys = jax.random.split(key, 2 + 3 * residual_blocks)
-        stem = _linear(keys[0], obs_dim, width)
+        extra_value_layers = value_head_layers + 1 if value_head_width else 0
+        keys = jax.random.split(key, 2 + 3 * residual_blocks + extra_value_layers)
+        cursor = 0
+        stem = _linear(keys[cursor], obs_dim, width); cursor += 1
         blocks = []
         in_width = width
         for i, out_width in enumerate(block_widths):
-            block = dict(w1=_linear(keys[1 + 3 * i], in_width, out_width)['w'],
+            block = dict(w1=_linear(keys[cursor], in_width, out_width)['w'],
                          b1=jnp.zeros(out_width),
-                         w2=_linear(keys[2 + 3 * i], out_width, out_width, scale=.1)['w'],
+                         w2=_linear(keys[cursor + 1], out_width, out_width, scale=.1)['w'],
                          b2=jnp.zeros(out_width))
             if in_width != out_width:
-                block['skip'] = _linear(keys[3 + 3 * i], in_width, out_width, scale=1.)['w']
+                block['skip'] = _linear(keys[cursor + 2], in_width, out_width, scale=1.)['w']
             blocks.append(block)
             in_width = out_width
-        head = _linear(keys[-1], in_width, N_ACTIONS + 4)
-        head['w'] = head['w'].at[:, :N_ACTIONS].multiply(.01)
-        head['w'] = head['w'].at[:, N_ACTIONS:].multiply(.5)
-        return dict(stem=stem, blocks=blocks, head=head)
+            cursor += 3
+        if not value_head_width:
+            head = _linear(keys[cursor], in_width, N_ACTIONS + 4)
+            head['w'] = head['w'].at[:, :N_ACTIONS].multiply(.01)
+            head['w'] = head['w'].at[:, N_ACTIONS:].multiply(.5)
+            return dict(stem=stem, blocks=blocks, head=head)
+        policy_head = _linear(keys[cursor], in_width, N_ACTIONS); cursor += 1
+        policy_head['w'] = policy_head['w'] * .01
+        value_layers = []
+        for _ in range(value_head_layers):
+            value_layers.append(_linear(keys[cursor], in_width, value_head_width))
+            cursor += 1
+            in_width = value_head_width
+        return dict(stem=stem, blocks=blocks, policy_head=policy_head,
+                    value_layers=value_layers, value_out=_linear(keys[cursor], in_width, 4, scale=.5))
     sizes = [obs_dim, width, width, N_ACTIONS + 4]
     keys = jax.random.split(key, 3)
     result = []
@@ -69,9 +85,18 @@ def apply(params, obs, mask, bf16=False):
             if 'skip' in block:
                 residual = residual @ block['skip'].astype(dtype)
             x = jax.nn.relu(x + residual)
-        layer = params['head']
-        out = (x @ layer['w'].astype(dtype) + layer['b'].astype(dtype)).astype(jnp.float32)
-        return jnp.where(mask, out[..., :N_ACTIONS], -1e9), out[..., N_ACTIONS:]
+        if 'head' in params:  # Pre-value-head residual checkpoint compatibility.
+            layer = params['head']
+            out = (x @ layer['w'].astype(dtype) + layer['b'].astype(dtype)).astype(jnp.float32)
+            return jnp.where(mask, out[..., :N_ACTIONS], -1e9), out[..., N_ACTIONS:]
+        policy = params['policy_head']
+        logits = (x @ policy['w'].astype(dtype) + policy['b'].astype(dtype)).astype(jnp.float32)
+        value_x = x
+        for layer in params['value_layers']:
+            value_x = jax.nn.relu(value_x @ layer['w'].astype(dtype) + layer['b'].astype(dtype))
+        value = params['value_out']
+        values = (value_x @ value['w'].astype(dtype) + value['b'].astype(dtype)).astype(jnp.float32)
+        return jnp.where(mask, logits, -1e9), values
     for layer in params[:-1]:
         x = jax.nn.relu(x @ layer['w'].astype(dtype) + layer['b'].astype(dtype))
     layer = params[-1]

@@ -81,7 +81,8 @@ def main():
     if args.untrained:
         _, kp, _ = jax.random.split(jax.random.PRNGKey(cfg.seed), 3)
         params = network.init(kp, env.observe(env.reset(jax.random.PRNGKey(0), cfg.players)).shape[0],
-                              cfg.width, cfg.residual_blocks, cfg.residual_taper)
+                              cfg.width, cfg.residual_blocks, cfg.residual_taper, cfg.value_head_width,
+                              cfg.value_head_layers)
     players = args.players or cfg.players
     if args.games % players:
         parser.error('games must divide evenly among player seats')

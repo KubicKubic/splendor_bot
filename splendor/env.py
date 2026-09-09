@@ -215,9 +215,16 @@ def winners(s):
 
 def outcome(s):
     win = winners(s)
-    # Fractional payoff for ties, zero-sum across active seats (all-way tie = 0).
-    payoff = (s.nplayers * win / jnp.maximum(win.sum(), 1) - 1) / (s.nplayers - 1)
-    return jnp.where(s.done & (jnp.arange(4) < s.nplayers), payoff, 0.)
+    # Every winning seat gets +1/m and every losing seat gets -1/(n-m), where
+    # n is the active player count and m is the number of winners.  This is
+    # zero-sum for every partial tie; an all-way tie has no losers and is zero.
+    active = jnp.arange(4) < s.nplayers
+    winners_count = win.sum()
+    losers_count = s.nplayers - winners_count
+    payoff = jnp.where(win, 1. / jnp.maximum(winners_count, 1),
+                       -1. / jnp.maximum(losers_count, 1))
+    payoff = jnp.where(losers_count > 0, payoff, 0.)
+    return jnp.where(s.done & active, payoff, 0.)
 
 
 def potential(s):

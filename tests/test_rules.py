@@ -154,6 +154,19 @@ def test_noble_choice_before_discard_and_round_end_tie():
     np.testing.assert_array_equal(env.outcome(s), np.zeros(4))
 
 
+def test_terminal_rewards_are_zero_sum_fractional_tie_payoffs():
+    base = env.reset(jax.random.PRNGKey(820), 4)._replace(done=jnp.array(True))
+    # Two winners: each +1/2; each of the two remaining players -1/2.
+    tied = base._replace(scores=jnp.array([16, 16, 15, 14]), bonuses=jnp.zeros((4, 5), jnp.int32))
+    np.testing.assert_allclose(env.outcome(tied), [.5, .5, -.5, -.5])
+    # Three winners in a four-player game: +1/3 each and -1 for the loser.
+    three_way = base._replace(scores=jnp.array([16, 16, 16, 15]), bonuses=jnp.zeros((4, 5), jnp.int32))
+    np.testing.assert_allclose(env.outcome(three_way), [1 / 3, 1 / 3, 1 / 3, -1.])
+    # All-way terminal tie is defined as neutral because n - m is zero.
+    all_way = base._replace(scores=jnp.array([16, 16, 16, 16]), bonuses=jnp.zeros((4, 5), jnp.int32))
+    np.testing.assert_allclose(env.outcome(all_way), np.zeros(4))
+
+
 def test_hidden_information():
     s = env.reset(jax.random.PRNGKey(9))
     # Same opponent reserve tier and identical public counts must be indistinguishable.

@@ -28,6 +28,8 @@ class Config:
     width: int = 256
     residual_blocks: int = 0
     residual_taper: bool = False
+    value_head_width: int = 0
+    value_head_layers: int = 0
     players: int = 2
     mixed_players: bool = False
     seed: int = 41
@@ -35,6 +37,7 @@ class Config:
     gamma: float = .997
     gae_lambda: float = .95
     entropy: float = .01
+    value_loss_coef: float = .25
     shaping: float = .25
     max_turns: int = 400
     bf16: bool = False
@@ -107,14 +110,14 @@ def make_update(cfg, optimizer):
             ratio = jnp.exp(logprob - batch['logprob'])
             policy_loss = -jnp.minimum(ratio * batch['adv'], jnp.clip(ratio, .8, 1.2) * batch['adv']).mean()
             clipped = batch['value'] + jnp.clip(values - batch['value'], -.2, .2)
-            value_error = jnp.maximum((values - batch['target']) ** 2,
-                                      (clipped - batch['target']) ** 2)
+            value_mse = jnp.maximum((values - batch['target']) ** 2,
+                                    (clipped - batch['target']) ** 2)
             active = jnp.arange(4) < batch['nplayers'][:, None]
-            value_loss = .5 * (value_error * active).sum() / active.sum()
+            value_mse = (value_mse * active).sum() / active.sum()
             entropy = -(jax.nn.softmax(logits) * logprobs).sum(-1).mean()
             kl = ((ratio - 1.) - (logprob - batch['logprob'])).mean()
             clipfrac = (jnp.abs(ratio - 1.) > .2).mean()
-            return policy_loss + .5 * value_loss - cfg.entropy * entropy, jnp.array([policy_loss, value_loss, entropy, kl, clipfrac])
+            return policy_loss + cfg.value_loss_coef * value_mse - cfg.entropy * entropy, jnp.array([policy_loss, value_mse, entropy, kl, clipfrac])
 
         def epoch(carry, _):
             p, opt, rng = carry
@@ -176,7 +179,7 @@ def load(path):
         if 'param_format' in data:
             obs_dim = env.observe(env.reset(jax.random.PRNGKey(0), cfg.players)).shape[0]
             template = network.init(jax.random.PRNGKey(0), obs_dim, cfg.width, cfg.residual_blocks,
-                                    cfg.residual_taper)
+                                    cfg.residual_taper, cfg.value_head_width, cfg.value_head_layers)
             leaves, tree = jax.tree.flatten(template)
             params = jax.tree.unflatten(tree, [jnp.asarray(data[f'param_{i}']) for i in range(len(leaves))])
         else:
@@ -197,7 +200,9 @@ def main():
     if args.resume and args.warm_start:
         parser.error('--resume and --warm-start are mutually exclusive')
     cfg = Config(**{name: getattr(args, name) for name in Config.__dataclass_fields__})
-    if any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'max_turns', 'save_every', 'log_every')) or cfg.residual_blocks < 0:
+    if (any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'max_turns', 'save_every', 'log_every'))
+            or cfg.residual_blocks < 0 or cfg.value_head_width < 0 or cfg.value_head_layers < 0
+            or cfg.value_loss_coef < 0 or bool(cfg.value_head_width) != bool(cfg.value_head_layers)):
         parser.error('Batch, iteration, model, and interval sizes must be positive')
     if cfg.players not in (2, 3, 4) or cfg.envs * cfg.horizon % cfg.minibatches:
         parser.error('players must be 2..4; envs*horizon must divide by minibatches')
@@ -218,13 +223,16 @@ def main():
                               jnp.full(cfg.envs, cfg.players))
     states = jax.vmap(env.reset)(jax.random.split(ke, cfg.envs), player_counts)
     params = network.init(kp, env.observe(jax.tree.map(lambda x: x[0], states)).shape[0], cfg.width,
-                          cfg.residual_blocks, cfg.residual_taper)
+                          cfg.residual_blocks, cfg.residual_taper, cfg.value_head_width,
+                          cfg.value_head_layers)
     if args.warm_start:
         params, parent_cfg = load(args.warm_start)
         player_compatible = (parent_cfg.players == cfg.players or cfg.mixed_players)
         if (not player_compatible or parent_cfg.width > cfg.width
                 or parent_cfg.residual_blocks != cfg.residual_blocks
-                or parent_cfg.residual_taper != cfg.residual_taper):
+                or parent_cfg.residual_taper != cfg.residual_taper
+                or parent_cfg.value_head_width != cfg.value_head_width
+                or parent_cfg.value_head_layers != cfg.value_head_layers):
             raise ValueError('Warm-start requires compatible players, architecture, and non-shrinking width')
         if parent_cfg.width < cfg.width:
             params = network.widen(params, cfg.width, jax.random.fold_in(kp, 800))
@@ -261,7 +269,7 @@ def main():
                 decisions_per_second=cfg.envs * cfg.horizon / elapsed,
                 turns_per_second=float(stats['turns']) / elapsed,
                 games=int(stats['games']), timeouts=int(stats['timeouts']), mean_score=float(stats['mean_score']),
-                mean_turns=float(stats['mean_turns']), policy_loss=float(stats['loss'][0]), value_loss=float(stats['loss'][1]),
+                mean_turns=float(stats['mean_turns']), policy_loss=float(stats['loss'][0]), value_mse=float(stats['loss'][1]),
                 entropy=float(stats['loss'][2]), approx_kl=float(stats['loss'][3]), clip_fraction=float(stats['loss'][4]),
                 games_by_players={str(n): int(stats['games_by_players'][n - 2]) for n in range(2, 5)},
                 timeouts_by_players={str(n): int(stats['timeouts_by_players'][n - 2]) for n in range(2, 5)},
