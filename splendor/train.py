@@ -39,6 +39,11 @@ class Config:
     policy_head_width: int = 0
     policy_head_layers: int = 0
     residual_stage_widths: str = ''
+    architecture: str = 'mlp'
+    transformer_layers: int = 4
+    transformer_heads: int = 4
+    transformer_ff_dim: int = 384
+    token_embed_width: int = 64
     players: int = 2
     mixed_players: bool = False
     seed: int = 41
@@ -241,9 +246,7 @@ def load(path):
         cfg = Config(**config_data)
         if 'param_format' in data:
             obs_dim = env.observe(env.reset(jax.random.PRNGKey(0), cfg.players), cfg.observation_version).shape[0]
-            template = network.init(jax.random.PRNGKey(0), obs_dim, cfg.width, cfg.residual_blocks,
-                                    cfg.residual_taper, cfg.value_head_width, cfg.value_head_layers,
-                                    cfg.policy_head_width, cfg.policy_head_layers, cfg.residual_stage_widths)
+            template = network.init_from_config(jax.random.PRNGKey(0), obs_dim, cfg)
             leaves, tree = jax.tree.flatten(template)
             params = jax.tree.unflatten(tree, [jnp.asarray(data[f'param_{i}']) for i in range(len(leaves))])
         else:
@@ -300,10 +303,18 @@ def main():
     if (any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'max_turns', 'save_every', 'log_every'))
             or cfg.residual_blocks < 0 or cfg.value_head_width < 0 or cfg.value_head_layers < 0
             or cfg.policy_head_width < 0 or cfg.policy_head_layers < 0 or cfg.value_loss_coef < 0
+            or cfg.architecture not in ('mlp', 'transformer')
+            or (cfg.architecture == 'transformer'
+                and (min(cfg.transformer_layers, cfg.transformer_heads,
+                         cfg.transformer_ff_dim, cfg.token_embed_width) <= 0
+                     or cfg.width % cfg.transformer_heads))
             or not 0. <= cfg.gamma <= 1. or not 0. <= cfg.gae_lambda <= 1.
             or bool(cfg.value_head_width) != bool(cfg.value_head_layers)
             or bool(cfg.policy_head_width) != bool(cfg.policy_head_layers)):
         parser.error('Invalid batch/model sizes, loss weights, gamma, or GAE lambda')
+    if cfg.architecture == 'transformer' and (cfg.residual_blocks or not cfg.value_head_width
+                                               or not cfg.policy_head_width):
+        parser.error('Transformer requires residual_blocks=0 and explicit policy/value heads')
     if cfg.players not in (2, 3, 4) or cfg.envs * cfg.horizon % cfg.minibatches:
         parser.error('players must be 2..4; envs*horizon must divide by minibatches')
     if not args.resume and cfg.observation_version != env.OBSERVATION_VERSION:
@@ -324,24 +335,21 @@ def main():
     player_counts = jnp.where(cfg.mixed_players, 2 + jnp.arange(cfg.envs) % 3,
                               jnp.full(cfg.envs, cfg.players))
     states = jax.vmap(env.reset)(jax.random.split(ke, cfg.envs), player_counts)
-    params = network.init(kp, env.observe(jax.tree.map(lambda x: x[0], states)).shape[0], cfg.width,
-                          cfg.residual_blocks, cfg.residual_taper, cfg.value_head_width,
-                          cfg.value_head_layers, cfg.policy_head_width, cfg.policy_head_layers,
-                          cfg.residual_stage_widths)
+    params = network.init_from_config(
+        kp, env.observe(jax.tree.map(lambda x: x[0], states)).shape[0], cfg)
     if args.warm_start:
         params, parent_cfg = load(args.warm_start)
         player_compatible = (parent_cfg.players == cfg.players or cfg.mixed_players)
+        architecture_fields = ('architecture', 'residual_blocks', 'residual_taper',
+            'value_head_width', 'value_head_layers', 'policy_head_width', 'policy_head_layers',
+            'residual_stage_widths', 'transformer_layers', 'transformer_heads',
+            'transformer_ff_dim', 'token_embed_width', 'observation_version')
         if (not player_compatible or parent_cfg.width > cfg.width
-                or parent_cfg.residual_blocks != cfg.residual_blocks
-                or parent_cfg.residual_taper != cfg.residual_taper
-                or parent_cfg.value_head_width != cfg.value_head_width
-                or parent_cfg.value_head_layers != cfg.value_head_layers
-                or parent_cfg.policy_head_width != cfg.policy_head_width
-                or parent_cfg.policy_head_layers != cfg.policy_head_layers
-                or parent_cfg.residual_stage_widths != cfg.residual_stage_widths
-                or parent_cfg.observation_version != cfg.observation_version):
+                or any(getattr(parent_cfg, name) != getattr(cfg, name) for name in architecture_fields)):
             raise ValueError('Warm-start requires compatible players, architecture, and non-shrinking width')
         if parent_cfg.width < cfg.width:
+            if cfg.architecture != 'mlp' or cfg.residual_blocks:
+                raise ValueError('Only the legacy MLP supports non-exact-width warm starts')
             params = network.widen(params, cfg.width, jax.random.fold_in(kp, 800))
     optimizer = optax.chain(optax.clip_by_global_norm(.5), optax.adam(cfg.lr, eps=1e-5))
     opt_state = optimizer.init(params)

@@ -31,17 +31,54 @@ def eval_summary(result, checkpoint, players, seed):
                 mean_turns=float(result['turns'][done].mean()) if done.any() else None)
 
 
+def automatic_config(run_dir, training):
+    """Build a reproducible ladder protocol from the run's saved config."""
+    if not training.get('mixed_players') and training.get('players') != 2:
+        raise ValueError('Automatic Elo supports mixed-player or fixed 2P training')
+    immutable_training = {key: value for key, value in training.items()
+                          if key not in ('updates', 'save_every', 'log_every')}
+    return dict(
+        run_dir=str(run_dir),
+        model_prefix=training.get('architecture', 'mlp'),
+        first_update=training['save_every'],
+        last_update=training['updates'],
+        interval=training['save_every'],
+        lag=4,
+        games=1024,
+        heuristic_games=384,
+        max_decisions=4000,
+        seed=20260911,
+        bf16=training['bf16'],
+        bootstrap=300,
+        poll_seconds=10,
+        expected_training=immutable_training,
+        automatic=True,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--config')
+    source.add_argument('--run-dir', help='derive protocol from RUN_DIR/config.json when it appears')
     parser.add_argument('--out', required=True)
     args = parser.parse_args()
-    cfg = json.loads(Path(args.config).read_text())
+    if args.config:
+        cfg = json.loads(Path(args.config).read_text())
+    else:
+        config_path = Path(args.run_dir) / 'config.json'
+        while not config_path.is_file():
+            time.sleep(1)
+        cfg = automatic_config(args.run_dir, json.loads(config_path.read_text()))
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     updates = list(range(cfg['first_update'], cfg['last_update'] + 1, cfg['interval']))
-    if not updates or updates[-1] != cfg['last_update']:
-        raise ValueError('last_update must lie on the checkpoint interval')
-    fixed_protocol = dict(config=cfg, algorithm='sparse Bradley-Terry checkpoint ladder',
+    if not updates:
+        updates = [cfg['last_update']]
+    elif updates[-1] != cfg['last_update']:
+        updates.append(cfg['last_update'])
+    protocol_config = ({key: value for key, value in cfg.items() if key != 'last_update'}
+                       if cfg.get('automatic') else cfg)
+    fixed_protocol = dict(config=protocol_config, algorithm='sparse Bradley-Terry checkpoint ladder',
         edges='previous checkpoint plus lag checkpoints back', anchor_update=updates[0],
         notes=['Match count grows linearly rather than as a full round robin.',
                'Each 2P match uses identical deals with swapped seats.',
@@ -73,7 +110,7 @@ def main():
         actual = asdict(train_cfg)
         mismatches = {key: (actual.get(key), value) for key, value in expected.items()
                       if actual.get(key) != value}
-        if not train_cfg.mixed_players or train_cfg.gamma != 1. or mismatches:
+        if (not train_cfg.mixed_players and train_cfg.players != 2) or train_cfg.gamma != 1. or mismatches:
             raise ValueError(f'Unexpected mixed-training configuration in {checkpoint}: {mismatches}')
         params_by_update[update] = params
         models.append(dict(name=f'{cfg.get("model_prefix", "mixed")}_{update:06d}', checkpoint=str(checkpoint),
@@ -81,7 +118,8 @@ def main():
                                               update * train_cfg.envs * train_cfg.horizon,
                            sha256=sha256(checkpoint)))
 
-        for players in (2, 3, 4):
+        diagnostic_players = (2, 3, 4) if train_cfg.mixed_players else (2,)
+        for players in diagnostic_players:
             if players not in diagnostic_fns:
                 diagnostic_fns[players] = make_evaluate(
                     train_cfg, cfg['heuristic_games'], cfg['max_decisions'],
@@ -126,9 +164,11 @@ def main():
             atomic_json(out / 'ratings.json', report)
             newest = report['ratings'][-1]
             print(json.dumps(dict(update=update, elo=newest['elo'], ci95=newest['ci95'],
-                                  edges=len(pairs), diagnostics=diagnostics[-3:])), flush=True)
+                                  edges=len(pairs),
+                                  diagnostics=diagnostics[-len(diagnostic_players):])), flush=True)
         else:
-            print(json.dumps(dict(update=update, anchor=True, diagnostics=diagnostics[-3:])), flush=True)
+            print(json.dumps(dict(update=update, anchor=True,
+                                  diagnostics=diagnostics[-len(diagnostic_players):])), flush=True)
         cursor += 1
     atomic_json(out / 'complete.json', dict(completed=True, last_update=updates[-1],
                                              checkpoints=len(updates), edges=len(pairs)))

@@ -151,6 +151,58 @@ def test_resnet_checkpoint_roundtrip(tmp_path):
     np.testing.assert_array_equal(values, restored_values)
 
 
+def test_transformer_tokens_cover_every_public_feature_and_fit_budget(tmp_path):
+    # Activate each scalar observation feature in isolation. Every row must
+    # reach at least one typed input; this catches silent holes and bad slices.
+    basis = jnp.eye(network.OBSERVATION_V3_DIM)
+    typed, validity = network.structured_observation(basis)
+    coverage = sum(jnp.abs(value).reshape((len(basis), -1)).sum(-1)
+                   for value in typed.values())
+    assert np.asarray(coverage > 0).all()
+    assert validity.shape == (network.OBSERVATION_V3_DIM, network.TOKEN_COUNT)
+
+    cfg = Config(width=64, architecture='transformer', transformer_layers=4,
+        transformer_heads=4, transformer_ff_dim=256, token_embed_width=64,
+        policy_head_width=640, policy_head_layers=2,
+        value_head_width=448, value_head_layers=2)
+    state = env.reset(jax.random.PRNGKey(801), 4)
+    params = network.init_from_config(
+        jax.random.PRNGKey(802), env.observe(state).shape[-1], cfg)
+    assert network.parameter_count(params) == 1_037_203
+    logits, values = network.apply(params, env.observe(state), env.legal_mask(state), True)
+    assert logits.shape == (env.N_ACTIONS,) and values.shape == (4,)
+    assert np.isfinite(np.asarray(values)).all()
+
+    path = tmp_path / 'transformer_policy.npz'
+    save(path, params, cfg, 0)
+    restored, restored_cfg = load(path)
+    restored_logits, restored_values = network.apply(
+        restored, env.observe(state), env.legal_mask(state), True)
+    assert restored_cfg == cfg
+    np.testing.assert_array_equal(logits, restored_logits)
+    np.testing.assert_array_equal(values, restored_values)
+
+
+def test_transformer_runs_through_complete_ppo_update():
+    cfg = Config(envs=6, horizon=4, epochs=1, minibatches=2, width=32,
+        architecture='transformer', transformer_layers=2, transformer_heads=4,
+        transformer_ff_dim=64, token_embed_width=16,
+        policy_head_width=32, policy_head_layers=1,
+        value_head_width=24, value_head_layers=1,
+        players=4, mixed_players=True)
+    key, kp, ke = jax.random.split(jax.random.PRNGKey(803), 3)
+    counts = 2 + jnp.arange(cfg.envs) % 3
+    states = jax.vmap(env.reset)(jax.random.split(ke, cfg.envs), counts)
+    first_state = jax.tree.map(lambda value: value[0], states)
+    params = network.init_from_config(kp, env.observe(first_state).shape[-1], cfg)
+    optimizer = optax.chain(optax.clip_by_global_norm(.5), optax.adam(cfg.lr, eps=1e-5))
+    result = make_update(cfg, optimizer)(params, optimizer.init(params), states, key)
+    stats = result[-1]
+    assert np.isfinite(np.asarray(stats['loss'])).all()
+    assert np.isfinite(np.asarray(stats['value_prediction_mse']))
+    assert np.isfinite(np.asarray(stats['value_explained_variance']))
+
+
 def test_site_adapter_and_complete_actions(tmp_path):
     cfg = Config(width=32)
     s = env.reset(jax.random.PRNGKey(5))

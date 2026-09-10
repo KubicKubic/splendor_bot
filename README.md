@@ -21,11 +21,13 @@ bash train_a100_fast.sh --out runs/fast_run
 bash train_a100_mixed.sh --out runs/mixed_run --updates 2000
 # 约 2M 参数的正式 ResNet；16384 个并行环境，rollout batch 为 2,097,152：
 bash train_a100_resnet_2m.sh --out runs/resnet_2m --updates 100000
+# 1,037,203 参数的类型化 token Transformer（4 层、4 头）：
+bash train_a100_transformer_1m.sh --out runs/transformer_1m --updates 100000
 # 实时只读 Web 面板（训练进度、稳定性、分人数轮次、Elo 与固定对手胜率）：
 ../generals_bot/.conda_envs/generals_bot/bin/python tools/serve_training_monitor.py \
   --host 0.0.0.0 --port 8765
-# 固定路径的 Elo PNG；仅在新模型完成 Elo 评分后原子更新：
-../generals_bot/.conda_envs/generals_bot/bin/python tools/watch_elo_plot.py
+# 所有 train_a100*.sh 启动器默认伴随启动 Elo ladder；图片位于 RUN_OUT_ladder/elo_live.png，
+# 且仅在新 checkpoint 完成评分后原子更新。短诊断可显式设置 SPLD_AUTO_ELO=0。
 # 2–4 人都可训练；默认 2 人，2048 并行局，256 隐层，500 次 PPO 更新。
 bash train_a100.sh --players 4 --out runs/four_player
 ../generals_bot/.conda_envs/generals_bot/bin/python -m pytest tests -q
@@ -38,6 +40,9 @@ bash train_a100.sh --players 4 --out runs/four_player
 不需要也不使用 Q 调度器。
 
 `latest.npz` 保存模型、Adam、环境状态及 RNG，可以完整恢复；`policy_*.npz` 只保存策略。
+每次正式启动还会自动创建 `<run_dir>_ladder`，以首个 checkpoint 为 1000 Elo 锚点，采用
+同牌局换座对局追踪后续 checkpoint，并仅在新模型评分完成时更新 `elo_live.png`。
+可用 `SPLD_ELO_OUT=/path/to/ladder` 改变输出位置。
 恢复时需匹配原训练参数，除总更新数、日志及保存间隔：
 
 ```bash
@@ -80,6 +85,14 @@ site_action = agent.plan_view(view_dict, jax.random.PRNGKey(1))
   也不读取已购发展卡身份，只使用公开的各颜色永久折扣、分数和已购卡总数。
 - 当前 observation v3 会将 2/3 人局的固定形状补齐座位严格清零；旧 v1/v2 编码仍保留，
   以便历史 checkpoint 按各自训练时的输入语义继续推理和评估。
+- Transformer 将全部 498 个公开输入拆为 47 个 token：全局、12 张市场牌、12 张预定牌、
+  5 个贵族、每座位独立的宝石/折扣/分数状态、公共银行、3 层暗牌余量及操作阶段上下文。
+  各语义类型使用独立两层 MLP，补齐座位和空卡槽不参与 attention key，再经 4 层 4-head
+  self-attention 通信。Policy 从全局 token 输出；共享 Value MLP 分别读取每个座位经通信后的
+  状态/宝石/折扣 token，最后仍投影为严格零和的四座位 value。
+- token Transformer 将 12 张市场牌、最多 12 张公开预定牌、5 个贵族、各座位的宝石、
+  折扣与局面摘要、银行、三层暗牌余量及阶段/付款上下文编码为 47 个 token；不同语义类型
+  使用独立两层 MLP，随后由 4 层 self-attention 通信。498 个 observation v3 标量全部被消费。
 - 站点显示计时不参与计分，未纳入策略输入。挂机 UI、房间网络协议不属于环境。
 
 78 维离散动作：pass 0；取币 1–30；买牌 31–45；预定 46–60；弃币 61–66；

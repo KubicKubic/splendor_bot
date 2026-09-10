@@ -81,10 +81,9 @@ def main():
     params, cfg = load(args.checkpoint)
     if args.untrained:
         _, kp, _ = jax.random.split(jax.random.PRNGKey(cfg.seed), 3)
-        params = network.init(kp, env.observe(env.reset(jax.random.PRNGKey(0), cfg.players), cfg.observation_version).shape[0],
-                              cfg.width, cfg.residual_blocks, cfg.residual_taper, cfg.value_head_width,
-                              cfg.value_head_layers, cfg.policy_head_width, cfg.policy_head_layers,
-                              cfg.residual_stage_widths)
+        params = network.init_from_config(
+            kp, env.observe(env.reset(jax.random.PRNGKey(0), cfg.players),
+                            cfg.observation_version).shape[0], cfg)
     players = args.players or cfg.players
     if args.games % players:
         parser.error('games must divide evenly among player seats')
