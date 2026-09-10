@@ -17,6 +17,12 @@ import optax
 
 from . import env, network
 
+# A game needs at least three scoring-card purchases plus the resource turns
+# that fund them, so eight fresh states per environment safely cover a
+# 128-step rollout.  The overflow counter makes any future horizon/rule
+# violation visible rather than silently changing reset semantics.
+RESET_POOL_SIZE = 8
+
 
 @dataclass(frozen=True)
 class Config:
@@ -67,10 +73,24 @@ def make_update(cfg, optimizer):
     mb_size = batch_size // cfg.minibatches
 
     def update(params, opt_state, states, key):
+        # Shuffling three decks is much more expensive than selecting a
+        # precomputed reset state.  Previously all envs generated a fresh game
+        # at every micro-step although only ~1% actually ended.  Generate a
+        # bounded independent pool once per rollout and consume it per env.
+        key, rollout_key, reset_key = jax.random.split(key, 3)
+        reset_keys = jax.random.split(reset_key, RESET_POOL_SIZE * cfg.envs).reshape(
+            RESET_POOL_SIZE, cfg.envs, 2)
+        reset_pool = jax.vmap(lambda keys: jax.vmap(env.reset)(keys, states.nplayers))(reset_keys)
+        env_indices = jnp.arange(cfg.envs)
+
         def collect(carry, _):
-            s, rng = carry
-            rng, ka, kr = jax.random.split(rng, 3)
+            s, rng, reset_index = carry
+            rng, ka = jax.random.split(rng)
             obs, mask = env.batch_observe(s), env.batch_mask(s)
+            # This cast is mathematically identical to network.apply's first
+            # cast, but stores half as many bytes in the rollout used by every
+            # PPO epoch/minibatch.
+            obs = obs.astype(jnp.bfloat16) if cfg.bf16 else obs
             logits, relative = network.apply(params, obs, mask, cfg.bf16)
             values = network.absolute_values(relative, s.player, s.nplayers)
             actions = jax.random.categorical(ka, logits).astype(jnp.int32)
@@ -85,16 +105,21 @@ def make_update(cfg, optimizer):
             reward = jax.vmap(env.outcome)(ns) + cfg.shaping * (gamma[:, None] * next_phi - phi)
             # Training time limit is an explicit artificial draw, recorded separately.
             discount = gamma * ~ended
-            fresh = jax.vmap(env.reset)(jax.random.split(kr, cfg.envs), ns.nplayers)
+            reset_slot = jnp.minimum(reset_index, RESET_POOL_SIZE - 1)
+            fresh = jax.tree.map(lambda leaf: leaf[reset_slot, env_indices], reset_pool)
+            reset_overflow = ended & (reset_index >= RESET_POOL_SIZE)
             reset_states = jax.tree.map(lambda a, b: jnp.where(ended.reshape((cfg.envs,) + (1,) * (a.ndim - 1)), b, a), ns, fresh)
             transition = dict(obs=obs, mask=mask, actions=actions, logprob=logprob, value=values,
                 reward=reward, discount=discount, continuation=(~ended).astype(jnp.float32),
                 trace_lambda=jnp.where(advanced, cfg.gae_lambda, 1.), player=s.player,
                 games=ns.done, timeout=timeout, scores=ns.scores * ns.done[:, None],
-                turns=ns.turns * ns.done, advanced=advanced, nplayers=ns.nplayers)
-            return (reset_states, rng), transition
+                turns=ns.turns * ns.done, advanced=advanced, nplayers=ns.nplayers,
+                ended=ended, reset_overflow=reset_overflow)
+            return (reset_states, rng, reset_index + ended.astype(jnp.int32)), transition
 
-        (states, key), roll = jax.lax.scan(collect, (states, key), None, length=cfg.horizon)
+        initial_reset_index = jnp.zeros(cfg.envs, jnp.int32)
+        (states, _, _), roll = jax.lax.scan(
+            collect, (states, rollout_key, initial_reset_index), None, length=cfg.horizon)
         _, last_relative = network.apply(params, env.batch_observe(states), env.batch_mask(states), cfg.bf16)
         # Mixed batches contain 2P, 3P, and 4P environments.  Bootstrap each
         # rollout with its actual player count; cfg.players is merely the
@@ -122,7 +147,8 @@ def make_update(cfg, optimizer):
             value_mse = (values - batch['target']) ** 2
             active = jnp.arange(4) < batch['nplayers'][:, None]
             value_mse = (value_mse * active).sum() / active.sum()
-            entropy = -(jax.nn.softmax(logits) * logprobs).sum(-1).mean()
+            # Reuse log-softmax instead of asking XLA for a second softmax.
+            entropy = -(jnp.exp(logprobs) * logprobs).sum(-1).mean()
             kl = ((ratio - 1.) - (logprob - batch['logprob'])).mean()
             clipfrac = (jnp.abs(ratio - 1.) > .2).mean()
             return policy_loss + cfg.value_loss_coef * value_mse - cfg.entropy * entropy, jnp.array([policy_loss, value_mse, entropy, kl, clipfrac])
@@ -155,6 +181,7 @@ def make_update(cfg, optimizer):
         prediction_mse = (((roll['value'] - targets) ** 2) * active_values).sum() / target_count
         explained_variance = 1. - prediction_mse / jnp.maximum(target_variance, 1e-8)
         stats = dict(loss=metrics.mean(0), games=count, timeouts=roll['timeout'].sum(),
+                     resets=roll['ended'].sum(), reset_overflows=roll['reset_overflow'].sum(),
                      mean_score=roll['scores'].sum() /
                                 jnp.maximum(jnp.sum(roll['games'] * roll['nplayers']), 1),
                      mean_turns=roll['turns'].sum() / jnp.maximum(count, 1), turns=roll['advanced'].sum(),
@@ -326,7 +353,8 @@ def main():
             row = dict(update=i, decisions=i * cfg.envs * cfg.horizon, seconds=elapsed,
                 decisions_per_second=cfg.envs * cfg.horizon / elapsed,
                 turns_per_second=float(stats['turns']) / elapsed,
-                games=int(stats['games']), timeouts=int(stats['timeouts']), mean_score=float(stats['mean_score']),
+                games=int(stats['games']), timeouts=int(stats['timeouts']), resets=int(stats['resets']),
+                reset_overflows=int(stats['reset_overflows']), mean_score=float(stats['mean_score']),
                 mean_turns=float(stats['mean_turns']), policy_loss=float(stats['loss'][0]), value_mse=float(stats['loss'][1]),
                 entropy=float(stats['loss'][2]), approx_kl=float(stats['loss'][3]), clip_fraction=float(stats['loss'][4]),
                 value_explained_variance=float(stats['value_explained_variance']),
@@ -336,6 +364,8 @@ def main():
                 mean_turns_by_players={str(n): float(stats['mean_turns_by_players'][n - 2]) for n in range(2, 5)})
             if not all(np.isfinite(x) for x in row.values() if isinstance(x, (int, float))):
                 raise FloatingPointError(row)
+            if row['reset_overflows']:
+                raise RuntimeError(f'Reset pool exhausted: {row}')
             log.write(json.dumps(row) + '\n')
             log.flush()
             if i == start_update + 1 or i % cfg.log_every == 0:

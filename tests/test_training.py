@@ -53,6 +53,7 @@ def test_mixed_player_update_and_widening():
     result = make_update(cfg, opt)(params, opt.init(params), states, key)
     stats = result[-1]
     assert int(stats['games_by_players'].sum()) == int(stats['games'])
+    assert int(stats['reset_overflows']) == 0
     np.testing.assert_array_equal(result[2].nplayers, expected_counts)
 
 
