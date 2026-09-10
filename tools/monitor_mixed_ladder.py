@@ -77,7 +77,8 @@ def main():
             raise ValueError(f'Unexpected mixed-training configuration in {checkpoint}: {mismatches}')
         params_by_update[update] = params
         models.append(dict(name=f'{cfg.get("model_prefix", "mixed")}_{update:06d}', checkpoint=str(checkpoint),
-                           training_decisions=update * train_cfg.envs * train_cfg.horizon,
+                           training_decisions=cfg.get('decision_offset', 0) +
+                                              update * train_cfg.envs * train_cfg.horizon,
                            sha256=sha256(checkpoint)))
 
         for players in (2, 3, 4):
