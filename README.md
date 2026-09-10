@@ -90,8 +90,9 @@ site_action = agent.plan_view(view_dict, jax.random.PRNGKey(1))
 共享 MLP 策略，价值头预测各玩家回报；观测以当前玩家为第一位，绝对座位额外编码。
 `train_a100_mixed.sh` 在同一 GPU batch 中近似等量覆盖 2/3/4 人，每局分别应用 HullQin
 对应的 4/5/7 枚彩色宝石、3/4/5 个贵族、实际人数轮末与胜者规则，并分别记录终局长度。
-GAE 保留每个座位独立的回报；当前正式训练使用 `gamma=1`、`lambda=1`，因此不对
-真实回合或回合内小决策折扣，并在 rollout 边界使用 value bootstrap。
+GAE 保留每个座位独立的回报；当前正式训练使用 `gamma=1`、`lambda=0.9`。真实奖励
+不折扣，GAE trace 只在真实回合边界乘 0.9，回合内小决策保持 trace 系数 1，
+并在 rollout 边界使用 value bootstrap。
 奖励为终局零和胜负（并列均分）加势函数差分塑形，势函数来自公开分数和已购卡数量。
 塑形在终局归零，避免永久累积买卡奖励。模型为前馈网络，尚未加入历史记忆或搜索。
 

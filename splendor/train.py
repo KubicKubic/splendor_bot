@@ -43,8 +43,8 @@ class Config:
     mixed_players: bool = False
     seed: int = 41
     lr: float = 3e-4
-    gamma: float = .997
-    gae_lambda: float = 1.0
+    gamma: float = 1.0
+    gae_lambda: float = .9
     entropy: float = .01
     value_loss_coef: float = .25
     shaping: float = .25
