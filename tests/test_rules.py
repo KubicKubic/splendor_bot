@@ -202,6 +202,24 @@ def test_observation_schema_keeps_legacy_checkpoints_usable():
     s = env.reset(jax.random.PRNGKey(906), 4)
     assert env.observe(s, 1).shape == (363,)
     assert env.observe(s, 2).shape == (498,)
+    assert env.observe(s, 3).shape == (498,)
+
+
+@pytest.mark.parametrize('players', [2, 3])
+def test_current_observation_zeros_reserved_cards_for_padding_seats(players):
+    s = env.reset(jax.random.PRNGKey(907 + players), players)._replace(
+        reserved=jnp.full((4, 3), -1, jnp.int32)
+            .at[0, 0].set(0).at[1, 0].set(1).at[2, 0].set(2))
+    feature_width = env.card_features(jnp.array(0)).shape[-1]
+    player_width = 6 + 5 + 1 + 3 + 1
+    offset = 4 * player_width + 6 + 12 * feature_width
+    size = 4 * 3 * feature_width
+    current = np.asarray(env.observe(s, 3))[offset:offset + size].reshape(4, 3, feature_width)
+    legacy = np.asarray(env.observe(s, 2))[offset:offset + size].reshape(4, 3, feature_width)
+    assert np.any(current[:players])
+    np.testing.assert_array_equal(current[players:], 0.)
+    # v2 remains bit-for-bit compatible with the historical duplicated slots.
+    assert np.any(legacy[players:])
 
 
 @pytest.mark.parametrize('tier,blind_action', [(0, 58), (1, 59), (2, 60)])

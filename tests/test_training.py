@@ -101,6 +101,25 @@ def test_max_turns_is_diagnostic_not_an_artificial_terminal():
     assert np.any(np.asarray(result[2].turns) > cfg.max_turns)
 
 
+def test_update_uses_configured_observation_version(monkeypatch):
+    cfg = Config(envs=6, horizon=4, epochs=1, minibatches=1, width=32,
+                 players=2, observation_version=2)
+    key, kp, ke = jax.random.split(jax.random.PRNGKey(132), 3)
+    states = env.batch_reset(jax.random.split(ke, cfg.envs), 2)
+    params = network.init(kp, env.observe(env.reset(ke), 2).shape[0], cfg.width)
+    opt = optax.chain(optax.clip_by_global_norm(.5), optax.adam(cfg.lr, eps=1e-5))
+    observed_versions = []
+    original = env.batch_observe_for_version
+
+    def record_version(batch, version):
+        observed_versions.append(version)
+        return original(batch, version)
+
+    monkeypatch.setattr(env, 'batch_observe_for_version', record_version)
+    make_update(cfg, opt)(params, opt.init(params), states, key)
+    assert observed_versions and set(observed_versions) == {2}
+
+
 def test_reconcile_metrics_matches_resumed_checkpoint(tmp_path):
     path = tmp_path / 'metrics.jsonl'
     rows = [dict(update=1, value='old'), dict(update=2, value='old'),

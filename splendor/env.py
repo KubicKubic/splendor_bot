@@ -33,7 +33,7 @@ TAKES = jnp.array(_takes, jnp.int32)
 # 46:61 reserve (12 market + 3 blind); 61:67 discard; 67:72 noble;
 # 72:78 choose how much gold to spend on the current color.
 N_ACTIONS = 78
-OBSERVATION_VERSION = 2
+OBSERVATION_VERSION = 3
 NORMAL, PAYMENT, CHOOSE_NOBLE, DISCARD = range(4)
 
 
@@ -259,8 +259,17 @@ def observe(s, version=OBSERVATION_VERSION):
     # every card exactly rather than exposing only the acting player's hand.
     if version == 1:
         reserved_cards = card_features(s.reserved[s.player]).ravel()
-    elif version == OBSERVATION_VERSION:
+    elif version == 2:
+        # Preserve the historical v2 padding semantics exactly: modulo seat
+        # ordering repeated active players into unused 2P/3P slots.  Existing
+        # checkpoints must continue to receive the representation on which
+        # they were trained.
         reserved_cards = card_features(reserved).ravel()
+    elif version == OBSERVATION_VERSION:
+        # Fixed-shape padding must carry no player information.  The other
+        # per-seat features above already apply this active mask; v2 omitted
+        # it for the exact reserved-card block.
+        reserved_cards = (card_features(reserved) * active[:, None, None]).ravel()
     else:
         raise ValueError(f'Unsupported observation version {version}')
     # cursor points just past every card removed from the face-down portion,

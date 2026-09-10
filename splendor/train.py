@@ -4,7 +4,7 @@ Each critic output belongs to a seat, so opponent turns and same-player
 microdecisions are handled without the common incorrect alternating-sign GAE.
 """
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -99,7 +99,8 @@ def make_update(cfg, optimizer):
         def collect(carry, _):
             s, rng, reset_index = carry
             rng, ka = jax.random.split(rng)
-            obs, mask = env.batch_observe(s), env.batch_mask(s)
+            obs = env.batch_observe_for_version(s, cfg.observation_version)
+            mask = env.batch_mask(s)
             # This cast is mathematically identical to network.apply's first
             # cast, but stores half as many bytes in the rollout used by every
             # PPO epoch/minibatch.
@@ -136,7 +137,8 @@ def make_update(cfg, optimizer):
         initial_reset_index = jnp.zeros(cfg.envs, jnp.int32)
         (states, _, _), roll = jax.lax.scan(
             collect, (states, rollout_key, initial_reset_index), None, length=cfg.horizon)
-        _, last_relative = network.apply(params, env.batch_observe(states), env.batch_mask(states), cfg.bf16)
+        last_observations = env.batch_observe_for_version(states, cfg.observation_version)
+        _, last_relative = network.apply(params, last_observations, env.batch_mask(states), cfg.bf16)
         # Mixed batches contain 2P, 3P, and 4P environments.  Bootstrap each
         # rollout with its actual player count; cfg.players is merely the
         # maximum/default and would rotate 2P/3P seats into nonexistent slots.
@@ -288,6 +290,13 @@ def main():
     if args.resume and args.warm_start:
         parser.error('--resume and --warm-start are mutually exclusive')
     cfg = Config(**{name: getattr(args, name) for name in Config.__dataclass_fields__})
+    # Exact resume is governed by the immutable schema stored in the
+    # checkpoint.  This also lets pre-v3 jobs resume without requiring callers
+    # to know or repeat their historical observation-version flag.
+    if args.resume:
+        with np.load(args.resume, allow_pickle=False) as data:
+            resume_config = json.loads(str(data['config']))
+        cfg = replace(cfg, observation_version=int(resume_config.get('observation_version', 1)))
     if (any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'max_turns', 'save_every', 'log_every'))
             or cfg.residual_blocks < 0 or cfg.value_head_width < 0 or cfg.value_head_layers < 0
             or cfg.policy_head_width < 0 or cfg.policy_head_layers < 0 or cfg.value_loss_coef < 0
@@ -297,7 +306,7 @@ def main():
         parser.error('Invalid batch/model sizes, loss weights, gamma, or GAE lambda')
     if cfg.players not in (2, 3, 4) or cfg.envs * cfg.horizon % cfg.minibatches:
         parser.error('players must be 2..4; envs*horizon must divide by minibatches')
-    if cfg.observation_version != env.OBSERVATION_VERSION:
+    if not args.resume and cfg.observation_version != env.OBSERVATION_VERSION:
         parser.error(f'New training must use observation version {env.OBSERVATION_VERSION}')
     devices = jax.devices()
     if not args.allow_cpu and (len(devices) != 1 or devices[0].platform != 'gpu' or 'A100' not in devices[0].device_kind):
