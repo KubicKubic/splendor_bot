@@ -19,7 +19,7 @@ bash train_a100.sh --out runs/new_run
 bash train_a100_fast.sh --out runs/fast_run
 # 约 1M 参数的统一 2P/3P/4P 模型（人数近似等量，gamma=1）：
 bash train_a100_mixed.sh --out runs/mixed_run --updates 2000
-# 约 2M 参数的正式 ResNet；8192 个并行环境，rollout batch 为 1,048,576：
+# 约 2M 参数的正式 ResNet；16384 个并行环境，rollout batch 为 2,097,152：
 bash train_a100_resnet_2m.sh --out runs/resnet_2m --updates 100000
 # 实时只读 Web 面板（训练进度、稳定性、分人数轮次、Elo 与固定对手胜率）：
 ../generals_bot/.conda_envs/generals_bot/bin/python tools/serve_training_monitor.py \
