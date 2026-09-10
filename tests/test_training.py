@@ -7,7 +7,8 @@ import optax
 
 from splendor import env, network
 from splendor.agent import Agent, from_hullqin_view
-from splendor.train import Config, load, make_update, reconcile_metrics, save
+from splendor.train import (Config, advantages, load, make_update,
+                            reconcile_metrics, save, value_statistics)
 from test_rules import view
 
 
@@ -62,7 +63,42 @@ def test_mixed_player_absolute_value_rotation_uses_each_environment_count():
     player = jnp.array([1, 2, 3])
     nplayers = jnp.array([2, 3, 4])
     absolute = network.absolute_values(relative, player, nplayers)
-    np.testing.assert_array_equal(absolute, [[11, 10, 0, 0], [21, 22, 20, 0], [31, 32, 33, 30]])
+    np.testing.assert_array_equal(absolute, [[.5, -.5, 0, 0], [0, 1, -1, 0], [-.5, .5, 1.5, -1.5]])
+    np.testing.assert_allclose(absolute.sum(-1), 0.)
+
+
+def test_standard_explained_variance_separates_bias_from_variance():
+    target = jnp.array([[[-1., 1., 0., 0.], [-.5, .5, 0., 0.]]])
+    prediction = target + jnp.array([[[2., 2., 0., 0.], [2., 2., 0., 0.]]])
+    active = jnp.array([[[True, True, False, False], [True, True, False, False]]])
+    mse, ev, _, _, bias = value_statistics(target, prediction, active)
+    np.testing.assert_allclose(mse, 4.)
+    np.testing.assert_allclose(ev, 1.)
+    np.testing.assert_allclose(bias, -2.)
+
+
+def test_lambda_one_targets_telescope_to_rollout_bootstrap():
+    value = jnp.array([[[.2, -.2, 0., 0.]], [[.4, -.4, 0., 0.]], [[.1, -.1, 0., 0.]]])
+    last = jnp.array([[.7, -.7, 0., 0.]])
+    zeros = jnp.zeros_like(value)
+    live = jnp.ones((3, 1))
+    _, target = advantages(zeros, value, last, live, live, live)
+    np.testing.assert_allclose(target, jnp.broadcast_to(last, value.shape), atol=1e-6)
+    np.testing.assert_allclose(target.sum(-1), 0., atol=1e-7)
+
+
+def test_max_turns_is_diagnostic_not_an_artificial_terminal():
+    cfg = Config(envs=6, horizon=8, epochs=1, minibatches=1, width=32,
+                 players=2, max_turns=1)
+    key, kp, ke = jax.random.split(jax.random.PRNGKey(131), 3)
+    states = env.batch_reset(jax.random.split(ke, cfg.envs), 2)
+    params = network.init(kp, env.observe(env.reset(ke)).shape[0], cfg.width)
+    opt = optax.chain(optax.clip_by_global_norm(.5), optax.adam(cfg.lr, eps=1e-5))
+    result = make_update(cfg, opt)(params, opt.init(params), states, key)
+    stats = result[-1]
+    assert int(stats['long_games']) > 0
+    assert int(stats['resets']) == int(stats['games'])
+    assert np.any(np.asarray(result[2].turns) > cfg.max_turns)
 
 
 def test_reconcile_metrics_matches_resumed_checkpoint(tmp_path):
@@ -104,6 +140,9 @@ def test_site_adapter_and_complete_actions(tmp_path):
     save(path, params, cfg, 0)
     agent = Agent(path, deterministic=True)
     np.testing.assert_array_equal(env.observe(s), env.observe(from_hullqin_view(view(s))))
+    deploy_view = view(s)
+    deploy_view.pop('playerCard')
+    np.testing.assert_array_equal(env.observe(s), env.observe(from_hullqin_view(deploy_view)))
     action = agent.plan_view(view(s), jax.random.PRNGKey(8))
     assert action['kind'] in ('take', 'reserve', 'reserve_blind', 'pass')
     s = s._replace(phase=jnp.int32(env.DISCARD), gems=s.gems.at[0].set(jnp.array([3, 3, 3, 2, 1, 1])))

@@ -18,7 +18,8 @@ def main():
             updates=rows[-1]['update'], decisions=rows[-1]['decisions'],
             first_logged_update=rows[0]['update'],
             decisions_in_log=sum(r['decisions'] // r['update'] for r in rows),
-            completed_games=completed, timeouts=sum(r['timeouts'] for r in rows),
+            completed_games=completed,
+            long_games=sum(r.get('long_games', r.get('timeouts', 0)) for r in rows),
             completed_game_mean_turns=(sum(r['mean_turns'] * r['games'] for r in rows) / completed
                                        if completed else None),
             latest_batch_mean_turns=rows[-1]['mean_turns'],

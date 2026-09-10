@@ -16,8 +16,10 @@ from .train import load
 
 def from_hullqin_view(v):
     """Input uses the site's view convention: market/noble IDs 1 based;
-    playerBooked/playerCard IDs 0 based.  Reserved-card identities for every
-    player and the remaining face-down count for every tier are required.
+    playerBooked IDs 0 based.  Reserved-card identities for every player and
+    the remaining face-down count for every tier are required.  Purchased-card
+    identities (playerCard) are deliberately ignored because deployment cannot
+    reliably obtain them; only public per-color bonus counts and scores are used.
     """
     n = len(v['playerGem'])
     if n not in (2, 3, 4):

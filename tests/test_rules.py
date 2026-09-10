@@ -167,6 +167,15 @@ def test_terminal_rewards_are_zero_sum_fractional_tie_payoffs():
     np.testing.assert_allclose(env.outcome(all_way), np.zeros(4))
 
 
+def test_shaped_rewards_remain_zero_sum():
+    s = env.reset(jax.random.PRNGKey(821), 4)
+    for action in (1, 2, 3, 4):
+        ns = env.step(s, jnp.int32(action))
+        reward = env.outcome(ns) + .25 * (env.potential(ns) - env.potential(s))
+        np.testing.assert_allclose(reward.sum(), 0., atol=1e-7)
+        s = ns
+
+
 def test_observation_exposes_all_reserved_cards_but_not_hidden_deck_order():
     s = env.reset(jax.random.PRNGKey(9))
     t = s._replace(reserved=s.reserved.at[1, 0].set(0))

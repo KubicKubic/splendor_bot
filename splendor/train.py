@@ -44,7 +44,7 @@ class Config:
     seed: int = 41
     lr: float = 3e-4
     gamma: float = .997
-    gae_lambda: float = .95
+    gae_lambda: float = 1.0
     entropy: float = .01
     value_loss_coef: float = .25
     shaping: float = .25
@@ -66,6 +66,19 @@ def advantages(reward, value, last_value, discount, continuation, trace_lambda):
     _, advantage = jax.lax.scan(body, jnp.zeros_like(last_value),
         (delta, discount, continuation, trace_lambda), reverse=True)
     return advantage, advantage + value
+
+
+def value_statistics(target, prediction, active):
+    """Masked MSE and standard explained variance for matching predictions."""
+    count = jnp.maximum(active.sum(), 1)
+    target_mean = (target * active).sum() / count
+    target_variance = (((target - target_mean) ** 2) * active).sum() / count
+    error = target - prediction
+    error_mean = (error * active).sum() / count
+    error_variance = (((error - error_mean) ** 2) * active).sum() / count
+    mse = ((error ** 2) * active).sum() / count
+    explained_variance = 1. - error_variance / jnp.maximum(target_variance, 1e-8)
+    return mse, explained_variance, target_mean, jnp.sqrt(target_variance), error_mean
 
 
 def make_update(cfg, optimizer):
@@ -97,13 +110,16 @@ def make_update(cfg, optimizer):
             logprob = jnp.take_along_axis(jax.nn.log_softmax(logits), actions[:, None], -1)[:, 0]
             ns = env.batch_step(s, actions)
             advanced = ns.turns != s.turns
-            timeout = (ns.turns >= cfg.max_turns) & ~ns.done
-            ended = ns.done | timeout
+            # max_turns is diagnostic only.  Treating a time limit as a zero-
+            # reward terminal changes the actual game and lets agents seek a
+            # draw by stalling.  Rollouts are already finite and long games
+            # remain live across update boundaries with a normal bootstrap.
+            long_game = advanced & (ns.turns == cfg.max_turns) & ~ns.done
+            ended = ns.done
             gamma = jnp.where(advanced, cfg.gamma, 1.)
             phi = jax.vmap(env.potential)(s)
             next_phi = jnp.where(ended[:, None], 0., jax.vmap(env.potential)(ns))
             reward = jax.vmap(env.outcome)(ns) + cfg.shaping * (gamma[:, None] * next_phi - phi)
-            # Training time limit is an explicit artificial draw, recorded separately.
             discount = gamma * ~ended
             reset_slot = jnp.minimum(reset_index, RESET_POOL_SIZE - 1)
             fresh = jax.tree.map(lambda leaf: leaf[reset_slot, env_indices], reset_pool)
@@ -112,7 +128,7 @@ def make_update(cfg, optimizer):
             transition = dict(obs=obs, mask=mask, actions=actions, logprob=logprob, value=values,
                 reward=reward, discount=discount, continuation=(~ended).astype(jnp.float32),
                 trace_lambda=jnp.where(advanced, cfg.gae_lambda, 1.), player=s.player,
-                games=ns.done, timeout=timeout, scores=ns.scores * ns.done[:, None],
+                games=ns.done, long_game=long_game, scores=ns.scores * ns.done[:, None],
                 turns=ns.turns * ns.done, advanced=advanced, nplayers=ns.nplayers,
                 ended=ended, reset_overflow=reset_overflow)
             return (reset_states, rng, reset_index + ended.astype(jnp.int32)), transition
@@ -170,25 +186,23 @@ def make_update(cfg, optimizer):
         player_counts = jnp.arange(2, 5)
         games_by_players = jnp.stack(
             [jnp.sum(roll['games'] & (roll['nplayers'] == n)) for n in player_counts])
-        timeouts_by_players = jnp.stack(
-            [jnp.sum(roll['timeout'] & (roll['nplayers'] == n)) for n in player_counts])
+        long_games_by_players = jnp.stack(
+            [jnp.sum(roll['long_game'] & (roll['nplayers'] == n)) for n in player_counts])
         turn_sums_by_players = jnp.stack(
             [jnp.sum(roll['turns'] * (roll['nplayers'] == n)) for n in player_counts])
         active_values = jnp.arange(4) < roll['nplayers'][..., None]
-        target_count = jnp.maximum(active_values.sum(), 1)
-        target_mean = (targets * active_values).sum() / target_count
-        target_variance = (((targets - target_mean) ** 2) * active_values).sum() / target_count
-        prediction_mse = (((roll['value'] - targets) ** 2) * active_values).sum() / target_count
-        explained_variance = 1. - prediction_mse / jnp.maximum(target_variance, 1e-8)
-        stats = dict(loss=metrics.mean(0), games=count, timeouts=roll['timeout'].sum(),
+        prediction_mse, explained_variance, target_mean, target_std, value_bias = value_statistics(
+            targets, roll['value'], active_values)
+        stats = dict(loss=metrics.mean(0), games=count, long_games=roll['long_game'].sum(),
                      resets=roll['ended'].sum(), reset_overflows=roll['reset_overflow'].sum(),
                      mean_score=roll['scores'].sum() /
                                 jnp.maximum(jnp.sum(roll['games'] * roll['nplayers']), 1),
                      mean_turns=roll['turns'].sum() / jnp.maximum(count, 1), turns=roll['advanced'].sum(),
-                     games_by_players=games_by_players, timeouts_by_players=timeouts_by_players,
+                     games_by_players=games_by_players, long_games_by_players=long_games_by_players,
                      mean_turns_by_players=turn_sums_by_players / jnp.maximum(games_by_players, 1),
                      value_explained_variance=explained_variance,
-                     value_target_mean=target_mean, value_target_std=jnp.sqrt(target_variance),
+                     value_prediction_mse=prediction_mse, value_bias=value_bias,
+                     value_target_mean=target_mean, value_target_std=target_std,
                      reward=roll['reward'].mean())
         return params, opt_state, states, key, stats
     return jax.jit(update, donate_argnums=(0, 1, 2, 3))
@@ -277,9 +291,10 @@ def main():
     if (any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'max_turns', 'save_every', 'log_every'))
             or cfg.residual_blocks < 0 or cfg.value_head_width < 0 or cfg.value_head_layers < 0
             or cfg.policy_head_width < 0 or cfg.policy_head_layers < 0 or cfg.value_loss_coef < 0
+            or not 0. <= cfg.gamma <= 1. or not 0. <= cfg.gae_lambda <= 1.
             or bool(cfg.value_head_width) != bool(cfg.value_head_layers)
             or bool(cfg.policy_head_width) != bool(cfg.policy_head_layers)):
-        parser.error('Batch, iteration, model, and interval sizes must be positive')
+        parser.error('Invalid batch/model sizes, loss weights, gamma, or GAE lambda')
     if cfg.players not in (2, 3, 4) or cfg.envs * cfg.horizon % cfg.minibatches:
         parser.error('players must be 2..4; envs*horizon must divide by minibatches')
     if cfg.observation_version != env.OBSERVATION_VERSION:
@@ -353,14 +368,15 @@ def main():
             row = dict(update=i, decisions=i * cfg.envs * cfg.horizon, seconds=elapsed,
                 decisions_per_second=cfg.envs * cfg.horizon / elapsed,
                 turns_per_second=float(stats['turns']) / elapsed,
-                games=int(stats['games']), timeouts=int(stats['timeouts']), resets=int(stats['resets']),
+                games=int(stats['games']), long_games=int(stats['long_games']), resets=int(stats['resets']),
                 reset_overflows=int(stats['reset_overflows']), mean_score=float(stats['mean_score']),
                 mean_turns=float(stats['mean_turns']), policy_loss=float(stats['loss'][0]), value_mse=float(stats['loss'][1]),
                 entropy=float(stats['loss'][2]), approx_kl=float(stats['loss'][3]), clip_fraction=float(stats['loss'][4]),
                 value_explained_variance=float(stats['value_explained_variance']),
+                value_prediction_mse=float(stats['value_prediction_mse']), value_bias=float(stats['value_bias']),
                 value_target_mean=float(stats['value_target_mean']), value_target_std=float(stats['value_target_std']),
                 games_by_players={str(n): int(stats['games_by_players'][n - 2]) for n in range(2, 5)},
-                timeouts_by_players={str(n): int(stats['timeouts_by_players'][n - 2]) for n in range(2, 5)},
+                long_games_by_players={str(n): int(stats['long_games_by_players'][n - 2]) for n in range(2, 5)},
                 mean_turns_by_players={str(n): float(stats['mean_turns_by_players'][n - 2]) for n in range(2, 5)})
             if not all(np.isfinite(x) for x in row.values() if isinstance(x, (int, float))):
                 raise FloatingPointError(row)

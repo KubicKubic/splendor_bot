@@ -16,7 +16,7 @@ HTML = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 const palette=['#55d7d2','#f1c75b','#e879a9','#67db8c'];
 function fmtSec(s){if(s==null)return '—';let h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?`${h}h ${m}m`:`${m}m`}
 function plot(id,series,percent=false){let c=document.getElementById(id),dpr=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;c.width=w*dpr;c.height=h*dpr;let x=c.getContext('2d');x.scale(dpr,dpr);x.clearRect(0,0,w,h);let vals=series.flatMap(s=>s.y).filter(Number.isFinite);if(!vals.length)return;let lo=Math.min(...vals),hi=Math.max(...vals);if(percent){lo=0;hi=1}if(hi===lo){lo-=1;hi+=1}let pad=30;x.strokeStyle='#ffffff20';x.fillStyle='#8eafb2';x.font='11px system-ui';for(let k=0;k<5;k++){let yy=pad+(h-2*pad)*k/4;x.beginPath();x.moveTo(pad,yy);x.lineTo(w-pad,yy);x.stroke();let v=hi-(hi-lo)*k/4;x.fillText(percent?(v*100).toFixed(0)+'%':v.toFixed(3),2,yy+4)}series.forEach((s,j)=>{x.strokeStyle=palette[j%palette.length];x.lineWidth=2;x.beginPath();s.y.forEach((v,i)=>{let xx=pad+(w-2*pad)*(s.y.length===1?0:i/(s.y.length-1)),yy=pad+(h-2*pad)*(hi-v)/(hi-lo);i?x.lineTo(xx,yy):x.moveTo(xx,yy)});x.stroke();x.fillStyle=x.strokeStyle;x.fillText(s.name,pad+90*j,h-7)});}
-async function refresh(){try{let d=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json()),m=d.latest,c=d.config;progress.textContent=`${m.update.toLocaleString()} / ${c.updates.toLocaleString()}`;progressBar.style.width=(100*m.update/c.updates)+'%';dps.textContent=(m.decisions_per_second/1e6).toFixed(2)+' M/s';eta.textContent=fmtSec(d.eta_seconds);elo.textContent=d.latest_elo?d.latest_elo.elo.toFixed(1)+' ± '+((d.latest_elo.ci95[1]-d.latest_elo.ci95[0])/2).toFixed(1):'等待评估';stability.textContent=m.approx_kl.toFixed(4)+' / '+(100*m.clip_fraction).toFixed(1)+'%';entropy.textContent=m.entropy.toFixed(3);players.innerHTML=['2','3','4'].map(p=>`<div class="card"><div class="label">${p} 人局 · 最新训练批次</div><div class="big">${m.mean_turns_by_players[p].toFixed(1)} 回合</div><div>${m.games_by_players[p].toLocaleString()} 局完成 · ${m.timeouts_by_players[p]} 截断</div></div>`).join('');plot('loss',[{name:'value loss',y:d.history.map(x=>x.value_loss)},{name:'KL',y:d.history.map(x=>x.approx_kl)}]);plot('turns',['2','3','4'].map(p=>({name:p+'P',y:d.history.map(x=>x.mean_turns_by_players[p])})));plot('eloChart',[{name:'Elo',y:d.ratings.map(x=>x.elo)}]);plot('win',['2','3','4'].map(p=>({name:p+'P',y:d.diagnostics.filter(x=>x.players==p).map(x=>x.score_all)})),true);footer.textContent=`自然完赛累计 ${d.completed_games.toLocaleString()} · 截断 ${d.timeouts.toLocaleString()} · 数据刷新 ${new Date().toLocaleTimeString()} · 每 5 秒自动刷新`;clock.textContent=new Date().toLocaleTimeString()}catch(e){clock.textContent='读取失败：'+e} }
+async function refresh(){try{let d=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json()),m=d.latest,c=d.config;progress.textContent=`${m.update.toLocaleString()} / ${c.updates.toLocaleString()}`;progressBar.style.width=(100*m.update/c.updates)+'%';dps.textContent=(m.decisions_per_second/1e6).toFixed(2)+' M/s';eta.textContent=fmtSec(d.eta_seconds);elo.textContent=d.latest_elo?d.latest_elo.elo.toFixed(1)+' ± '+((d.latest_elo.ci95[1]-d.latest_elo.ci95[0])/2).toFixed(1):'等待评估';stability.textContent=m.approx_kl.toFixed(4)+' / '+(100*m.clip_fraction).toFixed(1)+'%';entropy.textContent=m.entropy.toFixed(3);players.innerHTML=['2','3','4'].map(p=>`<div class="card"><div class="label">${p} 人局 · 最新训练批次</div><div class="big">${m.mean_turns_by_players[p].toFixed(1)} 回合</div><div>${m.games_by_players[p].toLocaleString()} 局完成 · ${m.long_games_by_players[p]} 次长局告警</div></div>`).join('');plot('loss',[{name:'value loss',y:d.history.map(x=>x.value_prediction_mse??x.value_mse)},{name:'EV',y:d.history.map(x=>x.value_explained_variance)},{name:'KL',y:d.history.map(x=>x.approx_kl)}]);plot('turns',['2','3','4'].map(p=>({name:p+'P',y:d.history.map(x=>x.mean_turns_by_players[p])})));plot('eloChart',[{name:'Elo',y:d.ratings.map(x=>x.elo)}]);plot('win',['2','3','4'].map(p=>({name:p+'P',y:d.diagnostics.filter(x=>x.players==p).map(x=>x.score_all)})),true);footer.textContent=`自然完赛累计 ${d.completed_games.toLocaleString()} · 长局告警 ${d.long_games.toLocaleString()} · 数据刷新 ${new Date().toLocaleTimeString()} · 每 5 秒自动刷新`;clock.textContent=new Date().toLocaleTimeString()}catch(e){clock.textContent='读取失败：'+e} }
 refresh();setInterval(refresh,5000);
 </script></body></html>'''
 
@@ -36,7 +36,11 @@ def status(run, ladder):
         rows = []
     if not rows:
         return dict(config=config, latest={}, history=[], ratings=[], diagnostics=[],
-                    latest_elo=None, eta_seconds=None, completed_games=0, timeouts=0)
+                    latest_elo=None, eta_seconds=None, completed_games=0, long_games=0)
+    for row in rows:
+        row.setdefault('long_games', row.get('timeouts', 0))
+        row.setdefault('long_games_by_players', row.get(
+            'timeouts_by_players', {str(n): 0 for n in range(2, 5)}))
     stride = max(1, len(rows) // 400)
     history = rows[::stride]
     if history[-1] is not rows[-1]:
@@ -52,7 +56,7 @@ def status(run, ladder):
                 diagnostics=diagnostics, latest_elo=ratings[-1] if ratings else None,
                 eta_seconds=remaining / dps if dps else None,
                 completed_games=sum(x['games'] for x in rows),
-                timeouts=sum(x['timeouts'] for x in rows))
+                long_games=sum(x['long_games'] for x in rows))
 
 
 def main():

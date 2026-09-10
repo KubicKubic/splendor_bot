@@ -171,5 +171,10 @@ def parameter_count(params):
 def absolute_values(relative, player, nplayers):
     nplayers = jnp.asarray(nplayers)
     index = (jnp.arange(4) - player[..., None]) % nplayers[..., None]
-    return (jnp.take_along_axis(relative, index, -1) *
-            (jnp.arange(4) < nplayers[..., None]))
+    active = jnp.arange(4) < nplayers[..., None]
+    absolute = jnp.take_along_axis(relative, index, -1) * active
+    # Every reward component is zero-sum, so the true multi-seat value lives
+    # in this subspace.  Removing the unidentifiable common mode also keeps
+    # lambda-return bootstraps exactly zero-sum.
+    active_mean = absolute.sum(-1, keepdims=True) / nplayers[..., None]
+    return jnp.where(active, absolute - active_mean, 0.)
