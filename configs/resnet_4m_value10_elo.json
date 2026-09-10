@@ -1,5 +1,5 @@
 {
-  "run_dir": "runs/a100_mixed_resnet_4m_value10",
+  "run_dir": "runs/a100_mixed_resnet_4m_value10_lr1e5",
   "model_prefix": "resnet4m",
   "first_update": 500,
   "last_update": 100000,
@@ -22,6 +22,7 @@
     "value_head_width": 450,
     "value_head_layers": 2,
     "value_loss_coef": 10.0,
+    "lr": 1e-05,
     "mixed_players": true,
     "gamma": 1.0
   }
