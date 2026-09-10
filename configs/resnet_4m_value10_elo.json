@@ -1,0 +1,28 @@
+{
+  "run_dir": "runs/a100_mixed_resnet_4m_value10",
+  "model_prefix": "resnet4m",
+  "first_update": 500,
+  "last_update": 100000,
+  "interval": 500,
+  "lag": 4,
+  "games": 1024,
+  "heuristic_games": 384,
+  "max_decisions": 4000,
+  "seed": 20261314,
+  "bf16": true,
+  "bootstrap": 300,
+  "poll_seconds": 10,
+  "expected_training": {
+    "width": 675,
+    "residual_blocks": 6,
+    "residual_taper": true,
+    "residual_stage_widths": "675,380,212",
+    "policy_head_width": 500,
+    "policy_head_layers": 2,
+    "value_head_width": 450,
+    "value_head_layers": 2,
+    "value_loss_coef": 10.0,
+    "mixed_players": true,
+    "gamma": 1.0
+  }
+}
