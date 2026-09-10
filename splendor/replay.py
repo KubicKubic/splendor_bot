@@ -60,7 +60,8 @@ def play(checkpoint, seed, mode, max_decisions=4000):
 
     @jax.jit
     def model_action(s, k):
-        logits, _ = network.apply(params, env.observe(s), env.legal_mask(s), True)
+        observation = env.observe(s, cfg.observation_version)
+        logits, _ = network.apply(params, observation, env.legal_mask(s), True)
         return jax.random.categorical(k, logits).astype(jnp.int32)
 
     choose_bot = jax.jit(bot_act)

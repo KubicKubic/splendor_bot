@@ -49,7 +49,8 @@ def make_evaluate(cfg, games, max_decisions, opponent, deterministic=False, play
             s, key = carry
             key, ka = jax.random.split(key)
             mask = env.batch_mask(s)
-            logits, _ = network.apply(params, env.batch_observe(s), mask, cfg.bf16)
+            observations = env.batch_observe_for_version(s, cfg.observation_version)
+            logits, _ = network.apply(params, observations, mask, cfg.bf16)
             other = jnp.where(mask, 0., -1e9) if opponent == 'random' else jax.vmap(heuristic)(s)
             own_actions = jnp.argmax(logits, -1) if deterministic else jax.random.categorical(ka, logits)
             # Random remains random even in deterministic-policy evaluations.
@@ -80,7 +81,7 @@ def main():
     params, cfg = load(args.checkpoint)
     if args.untrained:
         _, kp, _ = jax.random.split(jax.random.PRNGKey(cfg.seed), 3)
-        params = network.init(kp, env.observe(env.reset(jax.random.PRNGKey(0), cfg.players)).shape[0],
+        params = network.init(kp, env.observe(env.reset(jax.random.PRNGKey(0), cfg.players), cfg.observation_version).shape[0],
                               cfg.width, cfg.residual_blocks, cfg.residual_taper, cfg.value_head_width,
                               cfg.value_head_layers, cfg.policy_head_width, cfg.policy_head_layers,
                               cfg.residual_stage_widths)

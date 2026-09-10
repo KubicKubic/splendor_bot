@@ -46,6 +46,7 @@ class Config:
     bf16: bool = False
     save_every: int = 50
     log_every: int = 10
+    observation_version: int = env.OBSERVATION_VERSION
 
 
 def advantages(reward, value, last_value, discount, continuation, trace_lambda):
@@ -95,7 +96,10 @@ def make_update(cfg, optimizer):
 
         (states, key), roll = jax.lax.scan(collect, (states, key), None, length=cfg.horizon)
         _, last_relative = network.apply(params, env.batch_observe(states), env.batch_mask(states), cfg.bf16)
-        last_value = network.absolute_values(last_relative, states.player, cfg.players)
+        # Mixed batches contain 2P, 3P, and 4P environments.  Bootstrap each
+        # rollout with its actual player count; cfg.players is merely the
+        # maximum/default and would rotate 2P/3P seats into nonexistent slots.
+        last_value = network.absolute_values(last_relative, states.player, states.nplayers)
         adv, targets = advantages(roll['reward'], roll['value'], last_value, roll['discount'],
                                   roll['continuation'], roll['trace_lambda'])
         own_adv = jnp.take_along_axis(adv, roll['player'][..., None], -1)[..., 0]
@@ -144,12 +148,20 @@ def make_update(cfg, optimizer):
             [jnp.sum(roll['timeout'] & (roll['nplayers'] == n)) for n in player_counts])
         turn_sums_by_players = jnp.stack(
             [jnp.sum(roll['turns'] * (roll['nplayers'] == n)) for n in player_counts])
+        active_values = jnp.arange(4) < roll['nplayers'][..., None]
+        target_count = jnp.maximum(active_values.sum(), 1)
+        target_mean = (targets * active_values).sum() / target_count
+        target_variance = (((targets - target_mean) ** 2) * active_values).sum() / target_count
+        prediction_mse = (((roll['value'] - targets) ** 2) * active_values).sum() / target_count
+        explained_variance = 1. - prediction_mse / jnp.maximum(target_variance, 1e-8)
         stats = dict(loss=metrics.mean(0), games=count, timeouts=roll['timeout'].sum(),
                      mean_score=roll['scores'].sum() /
                                 jnp.maximum(jnp.sum(roll['games'] * roll['nplayers']), 1),
                      mean_turns=roll['turns'].sum() / jnp.maximum(count, 1), turns=roll['advanced'].sum(),
                      games_by_players=games_by_players, timeouts_by_players=timeouts_by_players,
                      mean_turns_by_players=turn_sums_by_players / jnp.maximum(games_by_players, 1),
+                     value_explained_variance=explained_variance,
+                     value_target_mean=target_mean, value_target_std=jnp.sqrt(target_variance),
                      reward=roll['reward'].mean())
         return params, opt_state, states, key, stats
     return jax.jit(update, donate_argnums=(0, 1, 2, 3))
@@ -179,9 +191,13 @@ def save(path, params, cfg, update, opt_state=None, states=None, key=None):
 
 def load(path):
     with np.load(path, allow_pickle=False) as data:
-        cfg = Config(**json.loads(str(data['config'])))
+        config_data = json.loads(str(data['config']))
+        # Checkpoints predating public opponent reserves used the 363-feature
+        # actor-private schema.  Preserve inference/evaluation compatibility.
+        config_data.setdefault('observation_version', 1)
+        cfg = Config(**config_data)
         if 'param_format' in data:
-            obs_dim = env.observe(env.reset(jax.random.PRNGKey(0), cfg.players)).shape[0]
+            obs_dim = env.observe(env.reset(jax.random.PRNGKey(0), cfg.players), cfg.observation_version).shape[0]
             template = network.init(jax.random.PRNGKey(0), obs_dim, cfg.width, cfg.residual_blocks,
                                     cfg.residual_taper, cfg.value_head_width, cfg.value_head_layers,
                                     cfg.policy_head_width, cfg.policy_head_layers, cfg.residual_stage_widths)
@@ -190,6 +206,32 @@ def load(path):
         else:
             params = [{name: jnp.asarray(data[f'layer_{i}_{name}']) for name in ('w', 'b')} for i in range(3)]
     return params, cfg
+
+
+def reconcile_metrics(path, restored_update):
+    """Make a resumed run's metrics agree with its recoverable checkpoint.
+
+    A crash can leave metrics newer than latest.npz, and repeated resumes can
+    create duplicate update numbers.  Retain the last record for each update
+    through the restored checkpoint and atomically discard unrecoverable rows.
+    """
+    path = Path(path)
+    if not path.exists():
+        return
+    retained = {}
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            update = int(row['update'])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f'Invalid metrics row {number} in {path}') from exc
+        if update <= restored_update:
+            retained[update] = row
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    temporary.write_text(''.join(json.dumps(retained[i]) + '\n' for i in sorted(retained)))
+    os.replace(temporary, path)
 
 
 def main():
@@ -213,6 +255,8 @@ def main():
         parser.error('Batch, iteration, model, and interval sizes must be positive')
     if cfg.players not in (2, 3, 4) or cfg.envs * cfg.horizon % cfg.minibatches:
         parser.error('players must be 2..4; envs*horizon must divide by minibatches')
+    if cfg.observation_version != env.OBSERVATION_VERSION:
+        parser.error(f'New training must use observation version {env.OBSERVATION_VERSION}')
     devices = jax.devices()
     if not args.allow_cpu and (len(devices) != 1 or devices[0].platform != 'gpu' or 'A100' not in devices[0].device_kind):
         raise RuntimeError(f'Expected one local A100, found {devices}; use --allow-cpu only for diagnostics')
@@ -243,7 +287,8 @@ def main():
                 or parent_cfg.value_head_layers != cfg.value_head_layers
                 or parent_cfg.policy_head_width != cfg.policy_head_width
                 or parent_cfg.policy_head_layers != cfg.policy_head_layers
-                or parent_cfg.residual_stage_widths != cfg.residual_stage_widths):
+                or parent_cfg.residual_stage_widths != cfg.residual_stage_widths
+                or parent_cfg.observation_version != cfg.observation_version):
             raise ValueError('Warm-start requires compatible players, architecture, and non-shrinking width')
         if parent_cfg.width < cfg.width:
             params = network.widen(params, cfg.width, jax.random.fold_in(kp, 800))
@@ -262,6 +307,8 @@ def main():
             start_update = int(data['update'])
     if start_update >= cfg.updates:
         parser.error('--updates must exceed the restored update number')
+    if args.resume:
+        reconcile_metrics(out / 'metrics.jsonl', start_update)
     # Validate checkpoint/config before modifying an existing run's metadata.
     (out / 'config.json').write_text(json.dumps(asdict(cfg), indent=2) + '\n')
     (out / 'provenance.json').write_text(json.dumps(device_info, indent=2) + '\n')
@@ -282,6 +329,8 @@ def main():
                 games=int(stats['games']), timeouts=int(stats['timeouts']), mean_score=float(stats['mean_score']),
                 mean_turns=float(stats['mean_turns']), policy_loss=float(stats['loss'][0]), value_mse=float(stats['loss'][1]),
                 entropy=float(stats['loss'][2]), approx_kl=float(stats['loss'][3]), clip_fraction=float(stats['loss'][4]),
+                value_explained_variance=float(stats['value_explained_variance']),
+                value_target_mean=float(stats['value_target_mean']), value_target_std=float(stats['value_target_std']),
                 games_by_players={str(n): int(stats['games_by_players'][n - 2]) for n in range(2, 5)},
                 timeouts_by_players={str(n): int(stats['timeouts_by_players'][n - 2]) for n in range(2, 5)},
                 mean_turns_by_players={str(n): float(stats['mean_turns_by_players'][n - 2]) for n in range(2, 5)})

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+
+# Balanced ~2M residual actor/critic.  Observation v2 adds every public
+# reserved card while retaining only aggregate counts for face-down decks.
+exec bash train_a100.sh \
+  --envs 4096 --horizon 128 --epochs 3 --minibatches 32 \
+  --width 480 --residual-blocks 6 --residual-taper \
+  --residual-stage-widths 480,270,150 \
+  --policy-head-width 352 --policy-head-layers 2 \
+  --value-head-width 316 --value-head-layers 2 \
+  --value-loss-coef 10.0 --players 4 --mixed-players --bf16 \
+  --gamma 1.0 --lr 0.00001 "$@"

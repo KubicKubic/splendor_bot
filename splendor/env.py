@@ -2,7 +2,8 @@
 
 The public site's optional payments, partial takes, pass, noble-before-discard
 order and tie rules are preserved. Microdecisions do not advance the turn.
-No deck order or opponent reserved-card identities enter observations.
+All reserved-card identities and the three face-down deck counts are observable;
+the shuffled face-down deck order is never exposed.
 """
 from itertools import combinations
 import json
@@ -32,6 +33,7 @@ TAKES = jnp.array(_takes, jnp.int32)
 # 46:61 reserve (12 market + 3 blind); 61:67 discard; 67:72 noble;
 # 72:78 choose how much gold to spend on the current color.
 N_ACTIONS = 78
+OBSERVATION_VERSION = 2
 NORMAL, PAYMENT, CHOOSE_NOBLE, DISCARD = range(4)
 
 
@@ -243,7 +245,7 @@ def card_features(ids):
     return features * valid[..., None]
 
 
-def observe(s):
+def observe(s, version=OBSERVATION_VERSION):
     order = (jnp.arange(4) + s.player) % s.nplayers
     active = jnp.arange(4) < s.nplayers
     reserved = s.reserved[order]
@@ -252,8 +254,21 @@ def observe(s):
                                tiers.sum(1) / 3., active[:, None]), -1) * active[:, None]
     nobles = jnp.concatenate((NOBLE[jnp.maximum(s.nobles, 0)] / 4., (s.nobles >= 0)[:, None]), -1)
     nobles *= (s.nobles >= 0)[:, None]
+    # Reserved cards are public in the deployed game.  Keep the same
+    # actor-relative seat order as the other per-player features, but encode
+    # every card exactly rather than exposing only the acting player's hand.
+    if version == 1:
+        reserved_cards = card_features(s.reserved[s.player]).ravel()
+    elif version == OBSERVATION_VERSION:
+        reserved_cards = card_features(reserved).ravel()
+    else:
+        raise ValueError(f'Unsupported observation version {version}')
+    # cursor points just past every card removed from the face-down portion,
+    # so this is exactly the remaining face-down count in each tier.  Counts
+    # are normalized only for conditioning; no deck identity/order is leaked.
+    face_down_left = (DECK_SIZE - s.cursor) / DECK_SIZE
     return jnp.concatenate((players.ravel(), s.bank / 7., card_features(s.market.ravel()).ravel(),
-        card_features(s.reserved[s.player]).ravel(), nobles.ravel(), (DECK_SIZE - s.cursor) / DECK_SIZE,
+        reserved_cards, nobles.ravel(), face_down_left,
         jax.nn.one_hot(s.phase, 4), jax.nn.one_hot(jnp.minimum(s.pay_color, 4), 5) * (s.phase == PAYMENT),
         s.pay_cost / 7. * (s.phase == PAYMENT), jax.nn.one_hot(s.pending, 15) * (s.phase == PAYMENT),
         jax.nn.one_hot(s.player, 4), jnp.array([s.nplayers / 4., jnp.any(s.scores >= 15)]))).astype(jnp.float32)
@@ -262,4 +277,11 @@ def observe(s):
 batch_reset = jax.vmap(reset, in_axes=(0, None))
 batch_step = jax.vmap(step)
 batch_observe = jax.vmap(observe)
+
+
+def batch_observe_for_version(states, version):
+    """Encode a batch with a checkpoint's immutable observation schema."""
+    return jax.vmap(lambda state: observe(state, version))(states)
+
+
 batch_mask = jax.vmap(legal_mask)

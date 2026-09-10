@@ -1,7 +1,7 @@
 """Adapter to the unmodified Apache-2.0 edwadli/splendor-ai ValueBuyBot.
 
-Only the authoritative HullQin-aligned env performs game transitions.
-No hidden deck or opponent reserved identities are passed to the bot.
+Only the authoritative HullQin-aligned env performs game transitions.  Public
+reserved-card identities are passed to every agent; hidden deck order is not.
 """
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -42,7 +42,7 @@ def to_native(s):
     p, n = int(s.player), int(s.nplayers)
     players = []
     for seat in range(n):
-        reserved = [CARDS[int(cid)] for cid in s.reserved[seat] if cid >= 0] if seat == p else [None] * int((s.reserved[seat] >= 0).sum())
+        reserved = [CARDS[int(cid)] for cid in s.reserved[seat] if cid >= 0]
         players.append(PlayerState(gems(s.gems[seat]), [CARDS[int(cid)] for cid in np.flatnonzero(s.bought == seat)],
                                    [], reserved, [NOBLES[int(nid)] for nid in np.flatnonzero(s.noble_owner == seat)]))
     market = defaultdict(list, {tier + 1: [CARDS[int(cid)] for cid in s.market[tier] if cid >= 0] for tier in range(3)})

@@ -22,7 +22,8 @@ from .train import load
 from .valuebot_jax import act as valuebot_act
 
 
-def make_match(games=2048, max_decisions=4000, bf16=True):
+def make_match(games=2048, max_decisions=4000, bf16=True,
+               observation_version=env.OBSERVATION_VERSION):
     """Build one fully compiled model-vs-ValueBuyBot match function."""
     if games < 4 or games % 2:
         raise ValueError('games must be even and >= 4 for paired deals')
@@ -38,7 +39,8 @@ def make_match(games=2048, max_decisions=4000, bf16=True):
             s, returns, rng, count, invalid = carry
             rng, action_key = jax.random.split(rng)
             mask = env.batch_mask(s)
-            logits, _ = network.apply(params, env.batch_observe(s), mask, bf16)
+            observations = env.batch_observe_for_version(s, observation_version)
+            logits, _ = network.apply(params, observations, mask, bf16)
             model_action = jax.random.categorical(action_key, logits).astype(jnp.int32)
             bot_action, next_returns, valid = jax.vmap(valuebot_act)(s, returns)
             bot_turn = (~s.done) & (s.player != model_seat)
@@ -91,10 +93,12 @@ def main():
     cfg0 = None
     for path in args.checkpoints:
         params, cfg = load(path)
-        if cfg.players != 2:
+        if cfg.players != 2 and not cfg.mixed_players:
             raise ValueError('Only 2-player checkpoints are supported')
         if cfg0 is not None and cfg.width != cfg0.width:
             raise ValueError('All checkpoints must use the same network shape')
+        if cfg0 is not None and cfg.observation_version != cfg0.observation_version:
+            raise ValueError('External-bot batches must use one observation schema')
         cfg0 = cfg if cfg0 is None else cfg0
         loaded.append(params)
 
@@ -115,7 +119,7 @@ def main():
         notes=[
             'All decisions and state transitions execute inside one JIT-compiled JAX loop.',
             'The original Python bot is used only for differential conformance tests.',
-            'No hidden deck or opponent reserved-card identities are passed to either agent.',
+            'Public reserved-card identities are passed to both agents; hidden deck order is not.',
             'Normal-colors-first payment and first eligible noble fill choices absent upstream.',
             'Any JAX bot illegal action invalidates the formal result; no fallback is used.',
             'Elo is a direct external-anchor transformation, not a human or global rating.'])
@@ -124,7 +128,7 @@ def main():
         raise ValueError('Protocol changed; use a new output directory')
     atomic_json(protocol_path, provenance)
 
-    run = make_match(args.games, args.max_decisions, not args.fp32)
+    run = make_match(args.games, args.max_decisions, not args.fp32, cfg0.observation_version)
     compile_start = time.perf_counter()
     executable = run.lower(loaded[0], args.seed).compile()
     compile_seconds = time.perf_counter() - compile_start

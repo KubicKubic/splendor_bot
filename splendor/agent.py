@@ -16,25 +16,30 @@ from .train import load
 
 def from_hullqin_view(v):
     """Input uses the site's view convention: market/noble IDs 1 based;
-    playerBooked/playerCard IDs 0 based. Opponent identities may be omitted
-    if reserve_tiers is supplied for each opponent (0 based tiers).
+    playerBooked/playerCard IDs 0 based.  Reserved-card identities for every
+    player and the remaining face-down count for every tier are required.
     """
     n = len(v['playerGem'])
     if n not in (2, 3, 4):
         raise ValueError('Expected 2..4 players')
     p = int(v['waitFor'])
     z = env.reset(jax.random.PRNGKey(0), n)
+    booked = v.get('playerBooked')
+    if booked is None or len(booked) != n:
+        raise ValueError('playerBooked must expose reserved-card IDs for every player')
     reserved = np.full((4, 3), -1, dtype=np.int32)
-    for i, row in enumerate(v.get('playerBooked', [[] for _ in range(n)])):
+    for i, row in enumerate(booked):
+        if len(row) > 3:
+            raise ValueError('A player cannot reserve more than three cards')
         reserved[i, :len(row)] = sorted(row)
-    for i, tiers in enumerate(v.get('reserve_tiers', [[] for _ in range(n)])):
-        if i != p:
-            # Dummy IDs encode only tier and are never observed as identities.
-            reserved[i] = -1
-            reserved[i, :len(tiers)] = [int(env.DECK_IDS[t, 0]) for t in tiers]
     counts = v.get('bankLeftCardCount')
     if counts is None:
+        if 'bankLeftCard' not in v:
+            raise ValueError('bankLeftCardCount is required when bankLeftCard is absent')
         counts = [len(x) for x in v['bankLeftCard']]
+    counts = np.asarray(counts, dtype=np.int32)
+    if counts.shape != (3,) or np.any(counts < 0) or np.any(counts > np.asarray(env.DECK_SIZE)):
+        raise ValueError('bankLeftCardCount must contain three valid face-down deck counts')
     phase = env.CHOOSE_NOBLE if v.get('waitNoble') else env.DISCARD if v.get('waitThrowing') else env.NORMAL
     return z._replace(bank=jnp.asarray(v['bankGem'], jnp.int32),
         gems=z.gems.at[:n].set(jnp.asarray(v['playerGem'], jnp.int32)),
@@ -50,7 +55,8 @@ class Agent:
         self.params, self.config = load(checkpoint)
         self.deterministic = deterministic
         def choose(params, state, key):
-            logits, _ = network.apply(params, env.observe(state), env.legal_mask(state), self.config.bf16)
+            observation = env.observe(state, self.config.observation_version)
+            logits, _ = network.apply(params, observation, env.legal_mask(state), self.config.bf16)
             return jnp.argmax(logits).astype(jnp.int32) if deterministic else jax.random.categorical(key, logits).astype(jnp.int32)
         self._choose = jax.jit(choose)
 

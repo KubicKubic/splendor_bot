@@ -7,7 +7,7 @@ import optax
 
 from splendor import env, network
 from splendor.agent import Agent, from_hullqin_view
-from splendor.train import Config, load, make_update, save
+from splendor.train import Config, load, make_update, reconcile_metrics, save
 from test_rules import view
 
 
@@ -54,6 +54,24 @@ def test_mixed_player_update_and_widening():
     stats = result[-1]
     assert int(stats['games_by_players'].sum()) == int(stats['games'])
     np.testing.assert_array_equal(result[2].nplayers, expected_counts)
+
+
+def test_mixed_player_absolute_value_rotation_uses_each_environment_count():
+    relative = jnp.array([[10., 11., 90., 91.], [20., 21., 22., 92.], [30., 31., 32., 33.]])
+    player = jnp.array([1, 2, 3])
+    nplayers = jnp.array([2, 3, 4])
+    absolute = network.absolute_values(relative, player, nplayers)
+    np.testing.assert_array_equal(absolute, [[11, 10, 0, 0], [21, 22, 20, 0], [31, 32, 33, 30]])
+
+
+def test_reconcile_metrics_matches_resumed_checkpoint(tmp_path):
+    path = tmp_path / 'metrics.jsonl'
+    rows = [dict(update=1, value='old'), dict(update=2, value='old'),
+            dict(update=2, value='latest'), dict(update=3, value='unrecoverable')]
+    path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    reconcile_metrics(path, 2)
+    assert [json.loads(line) for line in path.read_text().splitlines()] == [
+        dict(update=1, value='old'), dict(update=2, value='latest')]
 
 
 def test_resnet_checkpoint_roundtrip(tmp_path):

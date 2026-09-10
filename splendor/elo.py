@@ -27,9 +27,11 @@ def atomic_json(path, data):
     os.replace(temp, path)
 
 
-def make_match(games=2048, max_decisions=4000, bf16=True):
+def make_match(games=2048, max_decisions=4000, bf16=True, observation_versions=None):
     if games < 4 or games % 2:
         raise ValueError('games must be even and >= 4 for paired deals')
+
+    versions = observation_versions or (env.OBSERVATION_VERSION, env.OBSERVATION_VERSION)
 
     def match(params_a, params_b, seed):
         key, deal_key = jax.random.split(jax.random.PRNGKey(seed))
@@ -40,9 +42,11 @@ def make_match(games=2048, max_decisions=4000, bf16=True):
         def body(carry):
             s, rng, count = carry
             rng, action_key = jax.random.split(rng)
-            obs, mask = env.batch_observe(s), env.batch_mask(s)
-            logits_a, _ = network.apply(params_a, obs, mask, bf16)
-            logits_b, _ = network.apply(params_b, obs, mask, bf16)
+            mask = env.batch_mask(s)
+            obs_a = env.batch_observe_for_version(s, versions[0])
+            obs_b = env.batch_observe_for_version(s, versions[1])
+            logits_a, _ = network.apply(params_a, obs_a, mask, bf16)
+            logits_b, _ = network.apply(params_b, obs_b, mask, bf16)
             logits = jnp.where((s.player == seat_a)[:, None], logits_a, logits_b)
             action = jax.random.categorical(action_key, logits).astype(jnp.int32)
             return env.batch_step(s, action), rng, count + 1
@@ -189,18 +193,14 @@ def main():
     if len(names) != len(set(names)) or len(names) < 2:
         parser.error('Need at least 2 uniquely named models')
     anchor = names.index(manifest['anchor'])
-    loaded, hashes = [], []
-    shape = None
+    loaded, configs, hashes = [], [], []
     for m in models:
         p, cfg = load(m['checkpoint'])
-        if cfg.players != 2:
+        if cfg.players != 2 and not cfg.mixed_players:
             parser.error('This Elo protocol is for two-player games')
-        if shape is not None and cfg.width != shape:
-            parser.error('All checkpoints must have matching network shapes')
-        shape = cfg.width
         loaded.append(p)
+        configs.append(cfg)
         hashes.append(hashlib.sha256(Path(m['checkpoint']).read_bytes()).hexdigest())
-    run = make_match(manifest.get('games', 2048), manifest.get('max_decisions', 4000), manifest.get('bf16', True))
     pairs, results, summaries = [], [], []
     # Fixed manifest order determines fixed match seeds; save it for reproducibility.
     protocol = dict(manifest=manifest, sha256=dict(zip(names, hashes)), card_source=env.DATA['source'],
@@ -220,6 +220,9 @@ def main():
                     result = {k: data[k] for k in data.files}
             else:
                 seed = manifest['seed'] + 1009 * a + 9176 * b
+                run = make_match(manifest.get('games', 2048), manifest.get('max_decisions', 4000),
+                                 manifest.get('bf16', True),
+                                 (configs[a].observation_version, configs[b].observation_version))
                 result = jax.device_get(run(loaded[a], loaded[b], seed))
                 temp = path.with_suffix('.tmp.npz')
                 np.savez(temp, **result)

@@ -167,12 +167,41 @@ def test_terminal_rewards_are_zero_sum_fractional_tie_payoffs():
     np.testing.assert_allclose(env.outcome(all_way), np.zeros(4))
 
 
-def test_hidden_information():
+def test_observation_exposes_all_reserved_cards_but_not_hidden_deck_order():
     s = env.reset(jax.random.PRNGKey(9))
-    # Same opponent reserve tier and identical public counts must be indistinguishable.
     t = s._replace(reserved=s.reserved.at[1, 0].set(0))
-    u = t._replace(reserved=t.reserved.at[1, 0].set(1), decks=jnp.flip(t.decks, -1), bought=t.bought.at[4].set(1))
-    np.testing.assert_array_equal(env.observe(t), env.observe(u))
+    # Opponent reserved-card identities are public and must affect observation.
+    u = t._replace(reserved=t.reserved.at[1, 0].set(39))
+    assert not np.array_equal(env.observe(t), env.observe(u))
+    # Shuffled face-down identities remain hidden when the public count agrees.
+    hidden = t._replace(decks=jnp.flip(t.decks, -1), bought=t.bought.at[4].set(1))
+    np.testing.assert_array_equal(env.observe(t), env.observe(hidden))
+
+
+def test_partial_reserved_rows_keep_empty_slots_distinct_from_real_cards():
+    s = env.reset(jax.random.PRNGKey(905), 4)._replace(
+        reserved=jnp.array([[0, -1, -1], [1, 39, -1], [-1, -1, -1], [40, 41, 42]], jnp.int32))
+    encoded = env.card_features(s.reserved)
+    np.testing.assert_array_equal(encoded[..., -1], s.reserved >= 0)
+    np.testing.assert_array_equal(encoded[s.reserved < 0], np.zeros((6, encoded.shape[-1])))
+    # A partially filled opponent row is part of the public observation too.
+    added = s._replace(reserved=s.reserved.at[1, 2].set(2))
+    assert not np.array_equal(env.observe(s), env.observe(added))
+
+
+def test_observation_schema_keeps_legacy_checkpoints_usable():
+    s = env.reset(jax.random.PRNGKey(906), 4)
+    assert env.observe(s, 1).shape == (363,)
+    assert env.observe(s, 2).shape == (498,)
+
+
+@pytest.mark.parametrize('tier,blind_action', [(0, 58), (1, 59), (2, 60)])
+def test_face_down_count_is_observed_and_empty_tier_cannot_be_reserved(tier, blind_action):
+    s = env.reset(jax.random.PRNGKey(910 + tier), 4)
+    exhausted = s._replace(cursor=s.cursor.at[tier].set(env.DECK_SIZE[tier]))
+    assert not np.array_equal(env.observe(s), env.observe(exhausted))
+    assert bool(env.legal_mask(s)[blind_action])
+    assert not bool(env.legal_mask(exhausted)[blind_action])
 
 
 def test_optional_payments_match_every_site_combination():

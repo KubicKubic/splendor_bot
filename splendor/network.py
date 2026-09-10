@@ -13,7 +13,7 @@ def _linear(key, fan_in, fan_out, scale=1.):
 def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False,
          value_head_width=0, value_head_layers=0, policy_head_width=0,
          policy_head_layers=0, residual_stage_widths=''):
-    """Initialize the legacy two-hidden-layer MLP or a pre-activation residual MLP.
+    """Initialize the legacy two-hidden-layer MLP or a residual MLP.
 
     Each residual block contains two affine transforms.  Tapered networks split
     blocks across three stages, reducing width to 11/16 then 7/16 of the stem;
