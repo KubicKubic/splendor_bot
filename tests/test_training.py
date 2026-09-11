@@ -67,6 +67,36 @@ def test_mixed_player_update_and_widening():
     np.testing.assert_array_equal(result[2].nplayers, expected_counts)
 
 
+def test_four_hidden_layer_mlp_roundtrip(tmp_path):
+    cfg = Config(width=32, mlp_hidden_layers=4, mlp_activation='gelu')
+    state = env.reset(jax.random.PRNGKey(341), 4)
+    params = network.init_from_config(jax.random.PRNGKey(342), env.observe(state).shape[0], cfg)
+    assert len(params['flat_gelu_layers']) == 5
+    logits, values = network.apply(params, env.observe(state), env.legal_mask(state))
+    path = tmp_path / 'deep_mlp.npz'
+    save(path, params, cfg, 0)
+    restored, restored_cfg = load(path)
+    restored_logits, restored_values = network.apply(restored, env.observe(state), env.legal_mask(state))
+    assert restored_cfg == cfg
+    np.testing.assert_array_equal(logits, restored_logits)
+    np.testing.assert_array_equal(values, restored_values)
+
+
+def test_four_hidden_layer_gelu_mlp_runs_through_ppo_update():
+    cfg = Config(envs=6, horizon=4, epochs=1, minibatches=2, width=32,
+                 mlp_hidden_layers=4, mlp_activation='gelu', players=4,
+                 mixed_players=True)
+    key, kp, ke = jax.random.split(jax.random.PRNGKey(343), 3)
+    counts = 2 + jnp.arange(cfg.envs) % 3
+    states = jax.vmap(env.reset)(jax.random.split(ke, cfg.envs), counts)
+    first_state = jax.tree.map(lambda value: value[0], states)
+    params = network.init_from_config(kp, env.observe(first_state, cfg.observation_version).shape[-1], cfg)
+    optimizer = optax.chain(optax.clip_by_global_norm(.5), optax.adam(cfg.lr, eps=1e-5))
+    result = make_update(cfg, optimizer)(params, optimizer.init(params), states, key)
+    assert np.isfinite(np.asarray(result[-1]['loss'])).all()
+    assert np.isfinite(np.asarray(result[-1]['value_prediction_mse']))
+
+
 def test_mixed_player_absolute_value_rotation_uses_each_environment_count():
     relative = jnp.array([[10., 11., 90., 91.], [20., 21., 22., 92.], [30., 31., 32., 33.]])
     player = jnp.array([1, 2, 3])

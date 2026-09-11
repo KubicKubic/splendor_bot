@@ -7,7 +7,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 # critic, plain MSE value regression, and v3 public observation schema.
 exec bash train_a100.sh \
   --envs 8192 --horizon 128 --epochs 3 --minibatches 32 \
-  --architecture mlp --width 800 \
+  --architecture mlp --width 800 --mlp-hidden-layers 4 --mlp-activation gelu \
   --players 4 --mixed-players --bf16 \
   --gamma 1.0 --gae-lambda 0.9 --lr 0.0001 --value-loss-coef 1.0 \
   --entropy 0.01 --shaping 0.25 --max-turns 400 \

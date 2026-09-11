@@ -33,6 +33,8 @@ class Config:
     epochs: int = 3
     minibatches: int = 32
     width: int = 256
+    mlp_hidden_layers: int = 2
+    mlp_activation: str = 'relu'
     residual_blocks: int = 0
     residual_taper: bool = False
     value_head_width: int = 0
@@ -252,6 +254,9 @@ def load(path):
         # Checkpoints predating public opponent reserves used the 363-feature
         # actor-private schema.  Preserve inference/evaluation compatibility.
         config_data.setdefault('observation_version', 1)
+        # Flat MLP checkpoints historically had exactly two hidden layers.
+        config_data.setdefault('mlp_hidden_layers', 2)
+        config_data.setdefault('mlp_activation', 'relu')
         cfg = Config(**config_data)
         if 'param_format' in data:
             obs_dim = env.observe(env.reset(jax.random.PRNGKey(0), cfg.players), cfg.observation_version).shape[0]
@@ -259,7 +264,8 @@ def load(path):
             leaves, tree = jax.tree.flatten(template)
             params = jax.tree.unflatten(tree, [jnp.asarray(data[f'param_{i}']) for i in range(len(leaves))])
         else:
-            params = [{name: jnp.asarray(data[f'layer_{i}_{name}']) for name in ('w', 'b')} for i in range(3)]
+            params = [{name: jnp.asarray(data[f'layer_{i}_{name}']) for name in ('w', 'b')}
+                      for i in range(cfg.mlp_hidden_layers + 1)]
     return params, cfg
 
 
@@ -309,10 +315,11 @@ def main():
         with np.load(args.resume, allow_pickle=False) as data:
             resume_config = json.loads(str(data['config']))
         cfg = replace(cfg, observation_version=int(resume_config.get('observation_version', 1)))
-    if (any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'max_turns', 'save_every', 'log_every'))
+    if (any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'mlp_hidden_layers', 'max_turns', 'save_every', 'log_every'))
             or cfg.residual_blocks < 0 or cfg.value_head_width < 0 or cfg.value_head_layers < 0
             or cfg.policy_head_width < 0 or cfg.policy_head_layers < 0 or cfg.value_loss_coef < 0
             or cfg.architecture not in ('mlp', 'transformer')
+            or cfg.mlp_activation not in ('relu', 'gelu')
             or (cfg.architecture == 'transformer'
                 and (min(cfg.transformer_layers, cfg.transformer_heads,
                          cfg.transformer_ff_dim, cfg.token_embed_width) <= 0
@@ -350,6 +357,7 @@ def main():
         params, parent_cfg = load(args.warm_start)
         player_compatible = (parent_cfg.players == cfg.players or cfg.mixed_players)
         architecture_fields = ('architecture', 'residual_blocks', 'residual_taper',
+            'mlp_hidden_layers', 'mlp_activation',
             'value_head_width', 'value_head_layers', 'policy_head_width', 'policy_head_layers',
             'residual_stage_widths', 'transformer_layers', 'transformer_heads',
             'transformer_ff_dim', 'token_embed_width', 'observation_version')

@@ -138,8 +138,8 @@ def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False,
          value_head_width=0, value_head_layers=0, policy_head_width=0,
          policy_head_layers=0, residual_stage_widths='', architecture='mlp',
          transformer_layers=4, transformer_heads=4, transformer_ff_dim=384,
-         token_embed_width=64):
-    """Initialize the legacy two-hidden-layer MLP or a residual MLP.
+         token_embed_width=64, mlp_hidden_layers=2, mlp_activation='relu'):
+    """Initialize a flat MLP, a residual MLP, or the typed-token Transformer.
 
     Each residual block contains two affine transforms.  Tapered networks split
     blocks across three stages, reducing width to 11/16 then 7/16 of the stem;
@@ -213,16 +213,26 @@ def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False,
         else:
             result['policy_head'] = policy_head
         return result
-    sizes = [obs_dim, width, width, N_ACTIONS + 4]
-    keys = jax.random.split(key, 3)
+    if mlp_hidden_layers < 1:
+        raise ValueError('Flat MLP needs at least one hidden layer')
+    if mlp_activation not in ('relu', 'gelu'):
+        raise ValueError(f'Unsupported flat MLP activation {mlp_activation!r}')
+    sizes = [obs_dim] + [width] * mlp_hidden_layers + [N_ACTIONS + 4]
+    keys = jax.random.split(key, len(sizes) - 1)
     result = []
     for i, (a, b) in enumerate(zip(sizes[:-1], sizes[1:])):
         w = jax.random.normal(keys[i], (a, b)) * jnp.sqrt(2. / a)
-        if i == 2:
+        if i == len(sizes) - 2:
             w = w.at[:, :N_ACTIONS].multiply(.01)
             w = w.at[:, N_ACTIONS:].multiply(.5)
         result.append(dict(w=w, b=jnp.zeros(b)))
-    return result
+    # Retain the historical list representation for two-layer ReLU MLPs so
+    # all existing checkpoints retain bit-identical inference.  New variants
+    # use a typed dictionary so apply can select their activation without
+    # putting non-array metadata into the optimizer pytree.
+    if mlp_hidden_layers == 2 and mlp_activation == 'relu':
+        return result
+    return {f'flat_{mlp_activation}_layers': result}
 
 
 def init_from_config(key, obs_dim, cfg):
@@ -231,7 +241,7 @@ def init_from_config(key, obs_dim, cfg):
                 cfg.value_head_width, cfg.value_head_layers, cfg.policy_head_width,
                 cfg.policy_head_layers, cfg.residual_stage_widths, cfg.architecture,
                 cfg.transformer_layers, cfg.transformer_heads, cfg.transformer_ff_dim,
-                cfg.token_embed_width)
+                cfg.token_embed_width, cfg.mlp_hidden_layers, cfg.mlp_activation)
 
 
 def _apply_affine(layer, x, dtype):
@@ -328,6 +338,15 @@ def apply(params, obs, mask, bf16=False):
     if isinstance(params, dict) and 'token_embedders' in params:
         return _apply_transformer(params, obs, mask, bf16)
     dtype = jnp.bfloat16 if bf16 else jnp.float32
+    flat_key = next((name for name in ('flat_relu_layers', 'flat_gelu_layers') if isinstance(params, dict) and name in params), None)
+    if flat_key is not None:
+        x = obs.astype(dtype)
+        layers = params[flat_key]
+        activation = jax.nn.gelu if flat_key == 'flat_gelu_layers' else jax.nn.relu
+        for layer in layers[:-1]:
+            x = activation(_apply_affine(layer, x, dtype))
+        out = _apply_affine(layers[-1], x, dtype).astype(jnp.float32)
+        return jnp.where(mask, out[..., :N_ACTIONS], -1e9), out[..., N_ACTIONS:]
     x = obs.astype(dtype)
     if isinstance(params, dict):
         stem = params['stem']
@@ -371,8 +390,8 @@ def widen(params, width, key, noise=1e-4):
     Repeated units have their outgoing weights divided by repeat count, which
     preserves the original function before the small perturbation is applied.
     """
-    if not isinstance(params, list):
-        raise ValueError('widen only supports legacy MLP parameters')
+    if not isinstance(params, list) or len(params) != 3:
+        raise ValueError('widen only supports two-hidden-layer legacy MLP parameters')
     old = params[0]['b'].shape[0]
     if width < old:
         raise ValueError('widen cannot shrink a network')
