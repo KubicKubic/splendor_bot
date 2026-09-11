@@ -167,6 +167,19 @@ def main():
                                   edges=len(pairs),
                                   diagnostics=diagnostics[-len(diagnostic_players):])), flush=True)
         else:
+            # A one-model pool has a well-defined anchor even though it has no
+            # pairwise edge yet. Publishing it lets the live plot show the
+            # first evaluated checkpoint instead of waiting for checkpoint 2.
+            report = dict(anchor=models[0]['name'], anchor_elo=1000.,
+                ratings=[dict(name=models[0]['name'], elo=1000., ci95=[1000., 1000.],
+                              checkpoint=models[0]['checkpoint'],
+                              training_decisions=models[0]['training_decisions'])],
+                adjacent_changes=[], pairwise_fit=[], bootstrap_samples=cfg['bootstrap'],
+                checkpoint_sha256={models[0]['name']: models[0]['sha256']},
+                diagnostics=diagnostics, sparse_edges=summaries,
+                notes=['First evaluated checkpoint is the fixed 1000 Elo anchor.',
+                       'No pairwise Elo edge exists until the next checkpoint is evaluated.'])
+            atomic_json(out / 'ratings.json', report)
             print(json.dumps(dict(update=update, anchor=True,
                                   diagnostics=diagnostics[-len(diagnostic_players):])), flush=True)
         cursor += 1

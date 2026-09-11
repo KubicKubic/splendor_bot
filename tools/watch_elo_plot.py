@@ -27,6 +27,25 @@ def already_rendered(output, signature):
         return False
 
 
+def render_waiting(output):
+    """Create a truthful initial image before any checkpoint has been rated."""
+    fig, ax = plt.subplots(figsize=(10, 5.5), dpi=150)
+    fig.patch.set_facecolor('#081b21'); ax.set_facecolor('#102b34')
+    ax.set_title('Splendor JAX Mixed 2P/3P/4P — Live Elo', color='#e8f5f3', pad=12)
+    ax.text(.5, .54, 'Waiting for the first evaluated checkpoint', transform=ax.transAxes,
+            ha='center', va='center', color='#e8f5f3', fontsize=15)
+    ax.text(.5, .46, 'The chart updates only when a new model finishes Elo evaluation.',
+            transform=ax.transAxes, ha='center', va='center', color='#8eafb2', fontsize=10)
+    ax.set_xticks([]); ax.set_yticks([])
+    for spine in ax.spines.values(): spine.set_color('#ffffff22')
+    fig.tight_layout()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp = output.with_name('.' + output.name + '.tmp')
+    fig.savefig(temp, format='png', facecolor=fig.get_facecolor())
+    plt.close(fig)
+    os.replace(temp, output)
+
+
 def render(source, output):
     report = json.loads(source.read_text())
     ratings = report.get('ratings', [])
@@ -94,6 +113,9 @@ def main():
     parser.add_argument('--interval', type=float, default=30.,
                         help='poll period in seconds; no redraw occurs without a new rated model')
     args = parser.parse_args(); source, output = Path(args.source), Path(args.output)
+    if not output.is_file():
+        render_waiting(output)
+        print(f'created waiting image {output}', flush=True)
     previous = None
     while True:
         try:
