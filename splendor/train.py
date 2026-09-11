@@ -147,7 +147,7 @@ def make_update(cfg, optimizer):
                 trace_lambda=jnp.where(advanced, cfg.gae_lambda, 1.), player=s.player,
                 games=ns.done, long_game=long_game, scores=ns.scores * ns.done[:, None],
                 turns=ns.turns * ns.done, advanced=advanced, nplayers=ns.nplayers,
-                ended=ended, reset_overflow=reset_overflow)
+                ended=ended, truncation=ns.truncated, reset_overflow=reset_overflow)
             return (reset_states, rng, reset_index + ended.astype(jnp.int32)), transition
 
         initial_reset_index = jnp.zeros(cfg.envs, jnp.int32)
@@ -206,17 +206,21 @@ def make_update(cfg, optimizer):
             [jnp.sum(roll['games'] & (roll['nplayers'] == n)) for n in player_counts])
         long_games_by_players = jnp.stack(
             [jnp.sum(roll['long_game'] & (roll['nplayers'] == n)) for n in player_counts])
+        truncations_by_players = jnp.stack(
+            [jnp.sum(roll['truncation'] & (roll['nplayers'] == n)) for n in player_counts])
         turn_sums_by_players = jnp.stack(
             [jnp.sum(roll['turns'] * (roll['nplayers'] == n)) for n in player_counts])
         active_values = jnp.arange(4) < roll['nplayers'][..., None]
         prediction_mse, explained_variance, target_mean, target_std, value_bias = value_statistics(
             targets, roll['value'], active_values)
         stats = dict(loss=metrics.mean(0), games=count, long_games=roll['long_game'].sum(),
+                     truncations=roll['truncation'].sum(),
                      resets=roll['ended'].sum(), reset_overflows=roll['reset_overflow'].sum(),
                      mean_score=roll['scores'].sum() /
                                 jnp.maximum(jnp.sum(roll['games'] * roll['nplayers']), 1),
                      mean_turns=roll['turns'].sum() / jnp.maximum(count, 1), turns=roll['advanced'].sum(),
                      games_by_players=games_by_players, long_games_by_players=long_games_by_players,
+                     truncations_by_players=truncations_by_players,
                      mean_turns_by_players=turn_sums_by_players / jnp.maximum(games_by_players, 1),
                      value_explained_variance=explained_variance,
                      value_prediction_mse=prediction_mse, value_bias=value_bias,
@@ -329,12 +333,14 @@ def main():
             or bool(cfg.policy_head_width) != bool(cfg.policy_head_layers)):
         parser.error('Invalid batch/model sizes, loss weights, gamma, or GAE lambda')
     if cfg.architecture == 'transformer' and (cfg.residual_blocks or not cfg.value_head_width
-                                               or not cfg.policy_head_width):
+                                               or not cfg.policy_head_width
+                                               or cfg.observation_version != 3):
         parser.error('Transformer requires residual_blocks=0 and explicit policy/value heads')
     if cfg.players not in (2, 3, 4) or cfg.envs * cfg.horizon % cfg.minibatches:
         parser.error('players must be 2..4; envs*horizon must divide by minibatches')
-    if not args.resume and cfg.observation_version != env.OBSERVATION_VERSION:
-        parser.error(f'New training must use observation version {env.OBSERVATION_VERSION}')
+    expected_observation = 3 if cfg.architecture == 'transformer' else env.OBSERVATION_VERSION
+    if not args.resume and cfg.observation_version != expected_observation:
+        parser.error(f'New {cfg.architecture} training must use observation version {expected_observation}')
     devices = jax.devices()
     if not args.allow_cpu and (len(devices) != 1 or devices[0].platform != 'gpu' or 'A100' not in devices[0].device_kind):
         raise RuntimeError(f'Expected one local A100, found {devices}; use --allow-cpu only for diagnostics')
@@ -403,7 +409,7 @@ def main():
             row = dict(update=i, decisions=i * cfg.envs * cfg.horizon, seconds=elapsed,
                 decisions_per_second=cfg.envs * cfg.horizon / elapsed,
                 turns_per_second=float(stats['turns']) / elapsed,
-                games=int(stats['games']), long_games=int(stats['long_games']), resets=int(stats['resets']),
+                games=int(stats['games']), long_games=int(stats['long_games']), truncations=int(stats['truncations']), resets=int(stats['resets']),
                 reset_overflows=int(stats['reset_overflows']), mean_score=float(stats['mean_score']),
                 mean_turns=float(stats['mean_turns']), policy_loss=float(stats['loss'][0]), value_mse=float(stats['loss'][1]),
                 entropy=float(stats['loss'][2]), approx_kl=float(stats['loss'][3]), clip_fraction=float(stats['loss'][4]),
@@ -412,6 +418,7 @@ def main():
                 value_target_mean=float(stats['value_target_mean']), value_target_std=float(stats['value_target_std']),
                 games_by_players={str(n): int(stats['games_by_players'][n - 2]) for n in range(2, 5)},
                 long_games_by_players={str(n): int(stats['long_games_by_players'][n - 2]) for n in range(2, 5)},
+                truncations_by_players={str(n): int(stats['truncations_by_players'][n - 2]) for n in range(2, 5)},
                 mean_turns_by_players={str(n): float(stats['mean_turns_by_players'][n - 2]) for n in range(2, 5)})
             if not all(np.isfinite(x) for x in row.values() if isinstance(x, (int, float))):
                 raise FloatingPointError(row)

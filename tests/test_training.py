@@ -203,12 +203,12 @@ def test_transformer_tokens_cover_every_public_feature_and_fit_budget(tmp_path):
     cfg = Config(width=64, architecture='transformer', transformer_layers=4,
         transformer_heads=4, transformer_ff_dim=256, token_embed_width=64,
         policy_head_width=640, policy_head_layers=2,
-        value_head_width=448, value_head_layers=2)
+        value_head_width=448, value_head_layers=2, observation_version=3)
     state = env.reset(jax.random.PRNGKey(801), 4)
     params = network.init_from_config(
-        jax.random.PRNGKey(802), env.observe(state).shape[-1], cfg)
+        jax.random.PRNGKey(802), env.observe(state, 3).shape[-1], cfg)
     assert network.parameter_count(params) == 1_037_203
-    logits, values = network.apply(params, env.observe(state), env.legal_mask(state), True)
+    logits, values = network.apply(params, env.observe(state, 3), env.legal_mask(state), True)
     assert logits.shape == (env.N_ACTIONS,) and values.shape == (4,)
     assert np.isfinite(np.asarray(values)).all()
 
@@ -216,7 +216,7 @@ def test_transformer_tokens_cover_every_public_feature_and_fit_budget(tmp_path):
     save(path, params, cfg, 0)
     restored, restored_cfg = load(path)
     restored_logits, restored_values = network.apply(
-        restored, env.observe(state), env.legal_mask(state), True)
+        restored, env.observe(state, 3), env.legal_mask(state), True)
     assert restored_cfg == cfg
     np.testing.assert_array_equal(logits, restored_logits)
     np.testing.assert_array_equal(values, restored_values)
@@ -228,12 +228,12 @@ def test_transformer_runs_through_complete_ppo_update():
         transformer_ff_dim=64, token_embed_width=16,
         policy_head_width=32, policy_head_layers=1,
         value_head_width=24, value_head_layers=1,
-        players=4, mixed_players=True)
+        players=4, mixed_players=True, observation_version=3)
     key, kp, ke = jax.random.split(jax.random.PRNGKey(803), 3)
     counts = 2 + jnp.arange(cfg.envs) % 3
     states = jax.vmap(env.reset)(jax.random.split(ke, cfg.envs), counts)
     first_state = jax.tree.map(lambda value: value[0], states)
-    params = network.init_from_config(kp, env.observe(first_state).shape[-1], cfg)
+    params = network.init_from_config(kp, env.observe(first_state, 3).shape[-1], cfg)
     optimizer = optax.chain(optax.clip_by_global_norm(.5), optax.adam(cfg.lr, eps=1e-5))
     result = make_update(cfg, optimizer)(params, optimizer.init(params), states, key)
     stats = result[-1]

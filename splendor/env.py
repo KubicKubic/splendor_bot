@@ -33,7 +33,7 @@ TAKES = jnp.array(_takes, jnp.int32)
 # 46:61 reserve (12 market + 3 blind); 61:67 discard; 67:72 noble;
 # 72:78 choose how much gold to spend on the current color.
 N_ACTIONS = 78
-OBSERVATION_VERSION = 3
+OBSERVATION_VERSION = 4
 NORMAL, PAYMENT, CHOOSE_NOBLE, DISCARD = range(4)
 
 
@@ -56,6 +56,7 @@ class State(NamedTuple):
     pay_color: jax.Array
     pay_cost: jax.Array         # discounted cost, fixed throughout payment
     turns: jax.Array
+    truncated: jax.Array        # forced neutral draw at the public turn cap
     done: jax.Array
 
 
@@ -71,7 +72,7 @@ def reset(key, nplayers=2):
         z((4, 6)), z((4, 5)), z(4), jnp.full((4, 3), -1, jnp.int32),
         jnp.full(90, -1, jnp.int32), nobles, jnp.full(10, -1, jnp.int32),
         decks[:, :4], decks, jnp.full(3, 4, jnp.int32), z(()), jnp.asarray(nplayers, jnp.int32),
-        z(()), z(()), z(()), z(5), z(()), jnp.array(False))
+        z(()), z(()), z(()), z(5), z(()), jnp.array(False), jnp.array(False))
 
 
 def targets(s):
@@ -105,8 +106,16 @@ def legal_mask(s):
 
 def _advance(s):
     player = (s.player + 1) % s.nplayers
-    return s._replace(player=player, phase=jnp.int32(NORMAL), turns=s.turns + 1,
-                      done=(player == 0) & jnp.any(s.scores >= 15))
+    turns = s.turns + 1
+    round_end = (player == 0) & jnp.any(s.scores >= 15)
+    # Free pass is part of the deployed game's action set.  Without an
+    # episodic cap, however, pass cycles are infinite zero-reward trajectories
+    # and invalidate PPO's finite-return objective.  A timeout is a neutral
+    # draw; a real fair-round score finish takes precedence on the same turn.
+    timeout = turns >= s.nplayers * 50
+    truncated = timeout & ~round_end
+    return s._replace(player=player, phase=jnp.int32(NORMAL), turns=turns,
+                      truncated=truncated, done=round_end | timeout)
 
 
 def _after_noble(s):
@@ -212,7 +221,7 @@ def step(s, action):
 def winners(s):
     rank = jnp.where((jnp.arange(4) < s.nplayers) & (s.scores >= 15),
                      100 * s.scores - s.bonuses.sum(-1), -10000)
-    return s.done & (rank == rank.max())
+    return s.done & ~s.truncated & (rank == rank.max())
 
 
 def outcome(s):
@@ -226,7 +235,7 @@ def outcome(s):
     payoff = jnp.where(win, 1. / jnp.maximum(winners_count, 1),
                        -1. / jnp.maximum(losers_count, 1))
     payoff = jnp.where(losers_count > 0, payoff, 0.)
-    return jnp.where(s.done & active, payoff, 0.)
+    return jnp.where(s.done & ~s.truncated & active, payoff, 0.)
 
 
 def potential(s):
@@ -265,7 +274,7 @@ def observe(s, version=OBSERVATION_VERSION):
         # checkpoints must continue to receive the representation on which
         # they were trained.
         reserved_cards = card_features(reserved).ravel()
-    elif version == OBSERVATION_VERSION:
+    elif version in (3, OBSERVATION_VERSION):
         # Fixed-shape padding must carry no player information.  The other
         # per-seat features above already apply this active mask; v2 omitted
         # it for the exact reserved-card block.
@@ -276,11 +285,14 @@ def observe(s, version=OBSERVATION_VERSION):
     # so this is exactly the remaining face-down count in each tier.  Counts
     # are normalized only for conditioning; no deck identity/order is leaked.
     face_down_left = (DECK_SIZE - s.cursor) / DECK_SIZE
-    return jnp.concatenate((players.ravel(), s.bank / 7., card_features(s.market.ravel()).ravel(),
+    base = jnp.concatenate((players.ravel(), s.bank / 7., card_features(s.market.ravel()).ravel(),
         reserved_cards, nobles.ravel(), face_down_left,
         jax.nn.one_hot(s.phase, 4), jax.nn.one_hot(jnp.minimum(s.pay_color, 4), 5) * (s.phase == PAYMENT),
         s.pay_cost / 7. * (s.phase == PAYMENT), jax.nn.one_hot(s.pending, 15) * (s.phase == PAYMENT),
-        jax.nn.one_hot(s.player, 4), jnp.array([s.nplayers / 4., jnp.any(s.scores >= 15)]))).astype(jnp.float32)
+        jax.nn.one_hot(s.player, 4), jnp.array([s.nplayers / 4., jnp.any(s.scores >= 15)])))
+    if version == OBSERVATION_VERSION:
+        base = jnp.concatenate((base, jnp.array([s.turns / (s.nplayers * 50.)])))
+    return base.astype(jnp.float32)
 
 
 batch_reset = jax.vmap(reset, in_axes=(0, None))

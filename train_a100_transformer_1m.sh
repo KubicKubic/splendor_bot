@@ -13,6 +13,7 @@ export XLA_FLAGS="${XLA_FLAGS:+${XLA_FLAGS} }--xla_gpu_graph_level=0"
 exec bash train_a100.sh \
   --envs 16384 --horizon 128 --epochs 1 --minibatches 64 \
   --architecture transformer --width 64 \
+  --observation-version 3 \
   --transformer-layers 4 --transformer-heads 4 --transformer-ff-dim 256 \
   --token-embed-width 64 \
   --policy-head-width 640 --policy-head-layers 2 \

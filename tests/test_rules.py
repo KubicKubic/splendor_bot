@@ -167,6 +167,18 @@ def test_terminal_rewards_are_zero_sum_fractional_tie_payoffs():
     np.testing.assert_allclose(env.outcome(all_way), np.zeros(4))
 
 
+@pytest.mark.parametrize('players', [2, 3, 4])
+def test_turn_cap_is_neutral_draw_after_player_count_times_fifty_turns(players):
+    s = env.reset(jax.random.PRNGKey(825 + players), players)
+    # Pass remains legal per the deployed rules; the cap makes the repeated
+    # no-progress path finite for PPO.
+    for _ in range(players * 50):
+        s = STEP(s, jnp.int32(0))
+    assert bool(s.done) and bool(s.truncated) and int(s.turns) == players * 50
+    np.testing.assert_array_equal(env.winners(s), np.zeros(4, bool))
+    np.testing.assert_allclose(env.outcome(s), np.zeros(4))
+
+
 def test_shaped_rewards_remain_zero_sum():
     s = env.reset(jax.random.PRNGKey(821), 4)
     for action in (1, 2, 3, 4):
@@ -203,6 +215,15 @@ def test_observation_schema_keeps_legacy_checkpoints_usable():
     assert env.observe(s, 1).shape == (363,)
     assert env.observe(s, 2).shape == (498,)
     assert env.observe(s, 3).shape == (498,)
+    assert env.observe(s, 4).shape == (499,)
+
+
+def test_current_observation_includes_turn_cap_progress():
+    s = env.reset(jax.random.PRNGKey(9061), 3)
+    offset = -1
+    assert float(env.observe(s)[offset]) == 0.
+    progressed = s._replace(turns=jnp.int32(75))
+    assert float(env.observe(progressed)[offset]) == pytest.approx(.5)
 
 
 @pytest.mark.parametrize('players', [2, 3])
