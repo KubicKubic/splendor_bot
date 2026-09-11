@@ -43,7 +43,7 @@ bash train_a100.sh --players 4 --out runs/four_player
 每次正式启动还会自动创建 `<run_dir>_ladder`，以首个 checkpoint 为 1000 Elo 锚点，采用
 同牌局换座对局追踪后续 checkpoint，并仅在新模型评分完成时更新 `elo_live.png`。
 可用 `SPLD_ELO_OUT=/path/to/ladder` 改变输出位置。
-恢复时需匹配原训练参数，除总更新数、日志及保存间隔：
+恢复时需匹配原训练参数，除总更新数、PPO epoch 数、日志及保存间隔：
 
 ```bash
 bash train_a100.sh --resume runs/new_run/latest.npz --out runs/new_run --updates 1000

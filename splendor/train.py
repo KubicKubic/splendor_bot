@@ -22,6 +22,7 @@ from . import env, network
 # 128-step rollout.  The overflow counter makes any future horizon/rule
 # violation visible rather than silently changing reset semantics.
 RESET_POOL_SIZE = 8
+RESUME_MUTABLE_FIELDS = frozenset(('updates', 'epochs', 'log_every', 'save_every'))
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,14 @@ class Config:
     save_every: int = 50
     log_every: int = 10
     observation_version: int = env.OBSERVATION_VERSION
+
+
+def resume_mismatches(old_cfg, new_cfg):
+    """Fields that prevent an update-boundary exact-state continuation."""
+    return {name: (getattr(old_cfg, name), getattr(new_cfg, name))
+            for name in asdict(new_cfg)
+            if name not in RESUME_MUTABLE_FIELDS
+            and getattr(old_cfg, name) != getattr(new_cfg, name)}
 
 
 def advantages(reward, value, last_value, discount, continuation, trace_lambda):
@@ -356,8 +365,9 @@ def main():
     start_update = 0
     if args.resume:
         params, old_cfg = load(args.resume)
-        if any(getattr(old_cfg, k) != getattr(cfg, k) for k in asdict(cfg) if k not in ('updates', 'log_every', 'save_every')):
-            raise ValueError('Exact resume requires matching training configuration (except updates/logging/saving)')
+        if resume_mismatches(old_cfg, cfg):
+            raise ValueError('Exact resume requires matching training configuration '
+                             '(except updates/epochs/logging/saving)')
         with np.load(args.resume, allow_pickle=False) as data:
             leaves, tree = jax.tree.flatten(opt_state)
             opt_state = jax.tree.unflatten(tree, [jnp.asarray(data[f'opt_{i}']) for i in range(len(leaves))])

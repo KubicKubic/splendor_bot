@@ -8,7 +8,8 @@ import optax
 from splendor import env, network
 from splendor.agent import Agent, from_hullqin_view
 from splendor.train import (Config, advantages, load, make_update,
-                            reconcile_metrics, save, value_statistics)
+                            reconcile_metrics, resume_mismatches, save,
+                            value_statistics)
 from test_rules import view
 
 
@@ -34,6 +35,14 @@ def test_checkpoint_resume_reproduces_next_update(tmp_path):
     repeated = run(restored, restored_opt, restored_states, restored_key)
     for a, b in zip(jax.tree.leaves(result), jax.tree.leaves(repeated)):
         np.testing.assert_array_equal(a, b)
+
+
+def test_epoch_count_can_change_only_at_resume_boundary():
+    original = Config(epochs=3, updates=500, save_every=500, log_every=10)
+    continued = Config(epochs=1, updates=100000, save_every=250, log_every=50)
+    assert resume_mismatches(original, continued) == {}
+    incompatible = Config(epochs=1, lr=1e-5)
+    assert resume_mismatches(original, incompatible) == {'lr': (original.lr, 1e-5)}
 
 
 def test_mixed_player_update_and_widening():

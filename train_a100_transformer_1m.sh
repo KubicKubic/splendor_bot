@@ -11,7 +11,7 @@ export XLA_FLAGS="${XLA_FLAGS:+${XLA_FLAGS} }--xla_gpu_graph_level=0"
 # 1,037,203-parameter typed-token actor/critic. Every public observation field is
 # embedded by semantic type, then communicated through four attention blocks.
 exec bash train_a100.sh \
-  --envs 16384 --horizon 128 --epochs 3 --minibatches 64 \
+  --envs 16384 --horizon 128 --epochs 1 --minibatches 64 \
   --architecture transformer --width 64 \
   --transformer-layers 4 --transformer-heads 4 --transformer-ff-dim 256 \
   --token-embed-width 64 \

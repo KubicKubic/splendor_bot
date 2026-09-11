@@ -36,7 +36,7 @@ def automatic_config(run_dir, training):
     if not training.get('mixed_players') and training.get('players') != 2:
         raise ValueError('Automatic Elo supports mixed-player or fixed 2P training')
     immutable_training = {key: value for key, value in training.items()
-                          if key not in ('updates', 'save_every', 'log_every')}
+                          if key not in ('updates', 'epochs', 'save_every', 'log_every')}
     return dict(
         run_dir=str(run_dir),
         model_prefix=training.get('architecture', 'mlp'),
