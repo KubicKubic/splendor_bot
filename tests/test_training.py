@@ -276,3 +276,11 @@ def test_site_adapter_and_complete_actions(tmp_path):
     cost = np.asarray(jnp.maximum(env.COST[action['card_id']] - s.bonuses[0], 0))
     assert np.all(paid <= np.asarray(s.gems[0, :5])) and np.all(paid <= cost)
     assert int((cost - paid).sum()) == payment['gold'] <= int(s.gems[0, 5])
+
+
+def test_site_adapter_infers_fair_round_terminal_without_winner_flag():
+    s = env.reset(jax.random.PRNGKey(440), 2)._replace(
+        player=jnp.int32(0), phase=jnp.int32(env.NORMAL), scores=jnp.array([16, 13, 0, 0]))
+    site = view(s)
+    restored = from_hullqin_view(site)
+    assert bool(restored.done)

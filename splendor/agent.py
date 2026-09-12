@@ -43,13 +43,18 @@ def from_hullqin_view(v):
     if counts.shape != (3,) or np.any(counts < 0) or np.any(counts > np.asarray(env.DECK_SIZE)):
         raise ValueError('bankLeftCardCount must contain three valid face-down deck counts')
     phase = env.CHOOSE_NOBLE if v.get('waitNoble') else env.DISCARD if v.get('waitThrowing') else env.NORMAL
+    # The web view need not persist an explicit terminal bit.  A normal-phase
+    # return to seat 0 after any seat reaches 15 is the completed fair round
+    # and therefore terminal under the same rule as env._advance.
+    inferred_done = phase == env.NORMAL and p == 0 and np.any(np.asarray(v['playerScore']) >= 15)
     return z._replace(bank=jnp.asarray(v['bankGem'], jnp.int32),
         gems=z.gems.at[:n].set(jnp.asarray(v['playerGem'], jnp.int32)),
         bonuses=z.bonuses.at[:n].set(jnp.asarray(v['playerCardCount'], jnp.int32)),
         scores=z.scores.at[:n].set(jnp.asarray(v['playerScore'], jnp.int32)),
         reserved=jnp.asarray(reserved), nobles=z.nobles.at[:n + 1].set(jnp.asarray(v['bankNoble']) - 1),
         market=jnp.asarray(v['bankCard'], jnp.int32) - 1, cursor=env.DECK_SIZE - jnp.asarray(counts, jnp.int32),
-        player=jnp.int32(p), phase=jnp.int32(phase), done=jnp.bool_(bool(v.get('winner'))))
+        player=jnp.int32(p), phase=jnp.int32(phase),
+        done=jnp.bool_(bool(v.get('winner')) or inferred_done))
 
 
 class Agent:
@@ -58,6 +63,8 @@ class Agent:
         self.deterministic = deterministic
         def choose(params, state, key):
             observation = env.observe(state, self.config.observation_version)
+            observation = (observation.at[-1].set(0.) if self.config.zero_turn_feature
+                           else observation)
             logits, _ = network.apply(params, observation, env.legal_mask(state), self.config.bf16)
             return jnp.argmax(logits).astype(jnp.int32) if deterministic else jax.random.categorical(key, logits).astype(jnp.int32)
         self._choose = jax.jit(choose)
