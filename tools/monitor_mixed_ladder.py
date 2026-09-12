@@ -93,7 +93,12 @@ def main():
         raise ValueError('Ladder protocol changed; choose a new output directory')
     atomic_json(protocol_path, fixed_protocol)
 
-    match_fn = make_match(cfg['games'], cfg['max_decisions'], cfg['bf16'])
+    expected_training = cfg.get('expected_training', {})
+    observation_version = expected_training.get('observation_version', env.OBSERVATION_VERSION)
+    zero_turn_feature = expected_training.get('zero_turn_feature', False)
+    match_fn = make_match(cfg['games'], cfg['max_decisions'], cfg['bf16'],
+                          (observation_version, observation_version),
+                          (zero_turn_feature, zero_turn_feature))
     diagnostic_fns = {}
     params_by_update = {}
     models, pairs, results, summaries, diagnostics = [], [], [], [], []
