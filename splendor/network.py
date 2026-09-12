@@ -22,7 +22,8 @@ def _xavier(key, fan_in, fan_out, scale=1.):
 OBSERVATION_V3_DIM = 498
 TOKEN_COUNT = 47
 FUSED_ATTENTION_TOKEN_COUNT = 64
-POOLED_LATENT_COUNT = 8
+POOLED_LATENT_COUNT = 16
+POOLED_LATENT_LAYERS = 4
 
 
 def structured_observation(obs):
@@ -155,7 +156,7 @@ def _init_pooled_transformer(key, obs_dim, model_dim, layers, ff_dim, embed_widt
         raise ValueError('Invalid Pooled Set Transformer dimensions')
     input_widths = dict(market=15, reserved=15, nobles=6, gems=7, discounts=6,
                         players=5, bank=6, decks=1, context=35)
-    latent_layers = 2
+    latent_layers = POOLED_LATENT_LAYERS
     key_count = (len(input_widths) + 1 + latent_layers * 4 + 1 + layers * 2
                  + policy_head_layers + 1 + value_head_layers + 1)
     keys = iter(jax.random.split(key, key_count))
@@ -454,9 +455,9 @@ def _apply_pooled_transformer(params, obs, mask, bf16):
         token_values.append(value)
     token_values = jnp.concatenate(token_values, -2)
     token_valid = valid[:, 1:]
-    # Eight learned queries extract distinct card/player relations from all
+    # Sixteen learned queries extract distinct card/player relations from all
     # 46 semantic tokens.  The following attention blocks communicate only
-    # among these eight latents, keeping the costly attention path tiny.
+    # among these short latents, keeping the costly attention path tiny.
     scores = jnp.einsum('ld,btd->blt', params['latent_queries'].astype(dtype), token_values).astype(jnp.float32)
     scores = jnp.where(token_valid[:, None, :], scores, -1e9)
     x = jnp.einsum('blt,btd->bld', jax.nn.softmax(scores, -1).astype(dtype), token_values)
