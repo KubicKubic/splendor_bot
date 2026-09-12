@@ -458,17 +458,18 @@ def _apply_pooled_transformer(params, obs, mask, bf16):
     # Sixteen learned queries extract distinct card/player relations from all
     # 46 semantic tokens.  The following attention blocks communicate only
     # among these short latents, keeping the costly attention path tiny.
+    heads, head_dim = 4, token_values.shape[-1] // 4
+    attention_implementation = 'cudnn' if bf16 and jax.default_backend() == 'gpu' else 'xla'
     scores = jnp.einsum('ld,btd->blt', params['latent_queries'].astype(dtype), token_values).astype(jnp.float32)
     scores = jnp.where(token_valid[:, None, :], scores, -1e9)
     x = jnp.einsum('blt,btd->bld', jax.nn.softmax(scores, -1).astype(dtype), token_values)
-    heads, head_dim = 4, x.shape[-1] // 4
     for layer in params['latent_blocks']:
         residual = x
         qkv = _apply_affine(layer['qkv'], _layer_norm(layer['norm1'], x), dtype)
         qkv = qkv.reshape(qkv.shape[:-1] + (3, heads, head_dim))
         query, key, value = [qkv[..., i, :, :] for i in range(3)]
-        logits = jnp.einsum('bqhd,bkhd->bhqk', query, key).astype(jnp.float32) / jnp.sqrt(head_dim)
-        attended = jnp.einsum('bhqk,bkhd->bqhd', jax.nn.softmax(logits, -1).astype(dtype), value)
+        attended = jax.nn.dot_product_attention(query, key, value,
+                                                 implementation=attention_implementation)
         attended = attended.reshape(attended.shape[:-2] + (attended.shape[-2] * attended.shape[-1],))
         x = residual + _apply_affine(layer['projection'], attended, dtype)
         residual = x
