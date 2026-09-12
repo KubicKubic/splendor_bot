@@ -313,10 +313,14 @@ def main():
     parser.add_argument('--out', default='runs/a100')
     parser.add_argument('--resume')
     parser.add_argument('--warm-start', help='Load policy weights, start fresh optimizer / environments (permits new batch and precision)')
+    parser.add_argument('--warm-start-update', type=int, default=0,
+                        help='Record a fresh-optimizer warm start as continuing after this update')
     parser.add_argument('--allow-cpu', action='store_true', help='Explicitly allow diagnostic CPU runs')
     args = parser.parse_args()
     if args.resume and args.warm_start:
         parser.error('--resume and --warm-start are mutually exclusive')
+    if args.warm_start_update < 0 or (args.warm_start_update and not args.warm_start):
+        parser.error('--warm-start-update requires --warm-start and must be non-negative')
     cfg = Config(**{name: getattr(args, name) for name in Config.__dataclass_fields__})
     # Exact resume is governed by the immutable schema stored in the
     # checkpoint.  This also lets pre-v3 jobs resume without requiring callers
@@ -383,6 +387,8 @@ def main():
     optimizer = optax.chain(optax.clip_by_global_norm(.5), optax.adam(cfg.lr, eps=1e-5))
     opt_state = optimizer.init(params)
     start_update = 0
+    if args.warm_start:
+        start_update = args.warm_start_update
     if args.resume:
         params, old_cfg = load(args.resume)
         if resume_mismatches(old_cfg, cfg):
