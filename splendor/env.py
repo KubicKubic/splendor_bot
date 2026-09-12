@@ -300,9 +300,13 @@ batch_step = jax.vmap(step)
 batch_observe = jax.vmap(observe)
 
 
-def batch_observe_for_version(states, version):
-    """Encode a batch with a checkpoint's immutable observation schema."""
-    return jax.vmap(lambda state: observe(state, version))(states)
+def batch_observe_for_version(states, version, zero_turn_feature=False):
+    """Encode a batch with a checkpoint's observation schema/options."""
+    observations = jax.vmap(lambda state: observe(state, version))(states)
+    # v4's final scalar is normalized elapsed turns.  This intervention keeps
+    # the dimensionality and all other public features unchanged, which lets a
+    # v4 checkpoint continue with that scalar deliberately ablated.
+    return observations.at[:, -1].set(0.) if zero_turn_feature else observations
 
 
 batch_mask = jax.vmap(legal_mask)

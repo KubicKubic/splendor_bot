@@ -252,6 +252,15 @@ def test_face_down_count_is_observed_and_empty_tier_cannot_be_reserved(tier, bli
     assert not bool(env.legal_mask(exhausted)[blind_action])
 
 
+def test_turn_feature_ablation_only_zeros_v4_final_scalar():
+    states = env.batch_reset(jax.random.split(jax.random.PRNGKey(912), 2), 4)
+    states = states._replace(turns=jnp.array([7, 31], jnp.int32))
+    full = env.batch_observe_for_version(states, 4)
+    ablated = env.batch_observe_for_version(states, 4, zero_turn_feature=True)
+    np.testing.assert_array_equal(full[:, :-1], ablated[:, :-1])
+    np.testing.assert_array_equal(ablated[:, -1], 0.)
+
+
 def test_optional_payments_match_every_site_combination():
     s = env.reset(jax.random.PRNGKey(77))
     s = s._replace(gems=s.gems.at[0].set(jnp.array([2, 2, 2, 2, 2, 3])))

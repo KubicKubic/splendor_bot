@@ -25,7 +25,8 @@ RESET_POOL_SIZE = 8
 # Optimizer moments are independent of the scalar learning rate, so an
 # update-boundary continuation may deliberately reduce it without discarding
 # the learned Adam state.  Model/environment schema remains immutable.
-RESUME_MUTABLE_FIELDS = frozenset(('updates', 'epochs', 'log_every', 'save_every', 'lr'))
+RESUME_MUTABLE_FIELDS = frozenset(('updates', 'epochs', 'log_every', 'save_every', 'lr',
+                                   'zero_turn_feature'))
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class Config:
     save_every: int = 50
     log_every: int = 10
     observation_version: int = env.OBSERVATION_VERSION
+    zero_turn_feature: bool = False
 
 
 def resume_mismatches(old_cfg, new_cfg):
@@ -118,7 +120,7 @@ def make_update(cfg, optimizer):
         def collect(carry, _):
             s, rng, reset_index = carry
             rng, ka = jax.random.split(rng)
-            obs = env.batch_observe_for_version(s, cfg.observation_version)
+            obs = env.batch_observe_for_version(s, cfg.observation_version, cfg.zero_turn_feature)
             mask = env.batch_mask(s)
             # This cast is mathematically identical to network.apply's first
             # cast, but stores half as many bytes in the rollout used by every
@@ -156,7 +158,8 @@ def make_update(cfg, optimizer):
         initial_reset_index = jnp.zeros(cfg.envs, jnp.int32)
         (states, _, _), roll = jax.lax.scan(
             collect, (states, rollout_key, initial_reset_index), None, length=cfg.horizon)
-        last_observations = env.batch_observe_for_version(states, cfg.observation_version)
+        last_observations = env.batch_observe_for_version(
+            states, cfg.observation_version, cfg.zero_turn_feature)
         _, last_relative = network.apply(params, last_observations, env.batch_mask(states), cfg.bf16)
         # Mixed batches contain 2P, 3P, and 4P environments.  Bootstrap each
         # rollout with its actual player count; cfg.players is merely the

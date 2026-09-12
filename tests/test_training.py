@@ -43,6 +43,8 @@ def test_epoch_count_can_change_only_at_resume_boundary():
     assert resume_mismatches(original, continued) == {}
     lower_lr = Config(lr=2e-5)
     assert resume_mismatches(original, lower_lr) == {}
+    ablated_turns = Config(zero_turn_feature=True)
+    assert resume_mismatches(original, ablated_turns) == {}
     incompatible = Config(epochs=1, gamma=.99)
     assert resume_mismatches(original, incompatible) == {'gamma': (original.gamma, .99)}
 
@@ -152,13 +154,13 @@ def test_update_uses_configured_observation_version(monkeypatch):
     observed_versions = []
     original = env.batch_observe_for_version
 
-    def record_version(batch, version):
-        observed_versions.append(version)
-        return original(batch, version)
+    def record_version(batch, version, zero_turn_feature=False):
+        observed_versions.append((version, zero_turn_feature))
+        return original(batch, version, zero_turn_feature)
 
     monkeypatch.setattr(env, 'batch_observe_for_version', record_version)
     make_update(cfg, opt)(params, opt.init(params), states, key)
-    assert observed_versions and set(observed_versions) == {2}
+    assert observed_versions and set(observed_versions) == {(2, False)}
 
 
 def test_reconcile_metrics_matches_resumed_checkpoint(tmp_path):

@@ -49,7 +49,8 @@ def make_evaluate(cfg, games, max_decisions, opponent, deterministic=False, play
             s, key = carry
             key, ka = jax.random.split(key)
             mask = env.batch_mask(s)
-            observations = env.batch_observe_for_version(s, cfg.observation_version)
+            observations = env.batch_observe_for_version(
+                s, cfg.observation_version, cfg.zero_turn_feature)
             logits, _ = network.apply(params, observations, mask, cfg.bf16)
             other = jnp.where(mask, 0., -1e9) if opponent == 'random' else jax.vmap(heuristic)(s)
             own_actions = jnp.argmax(logits, -1) if deterministic else jax.random.categorical(ka, logits)
