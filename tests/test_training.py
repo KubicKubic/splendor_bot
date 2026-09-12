@@ -41,8 +41,10 @@ def test_epoch_count_can_change_only_at_resume_boundary():
     original = Config(epochs=3, updates=500, save_every=500, log_every=10)
     continued = Config(epochs=1, updates=100000, save_every=250, log_every=50)
     assert resume_mismatches(original, continued) == {}
-    incompatible = Config(epochs=1, lr=1e-5)
-    assert resume_mismatches(original, incompatible) == {'lr': (original.lr, 1e-5)}
+    lower_lr = Config(lr=2e-5)
+    assert resume_mismatches(original, lower_lr) == {}
+    incompatible = Config(epochs=1, gamma=.99)
+    assert resume_mismatches(original, incompatible) == {'gamma': (original.gamma, .99)}
 
 
 def test_mixed_player_update_and_widening():

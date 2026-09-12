@@ -22,7 +22,10 @@ from . import env, network
 # 128-step rollout.  The overflow counter makes any future horizon/rule
 # violation visible rather than silently changing reset semantics.
 RESET_POOL_SIZE = 8
-RESUME_MUTABLE_FIELDS = frozenset(('updates', 'epochs', 'log_every', 'save_every'))
+# Optimizer moments are independent of the scalar learning rate, so an
+# update-boundary continuation may deliberately reduce it without discarding
+# the learned Adam state.  Model/environment schema remains immutable.
+RESUME_MUTABLE_FIELDS = frozenset(('updates', 'epochs', 'log_every', 'save_every', 'lr'))
 
 
 @dataclass(frozen=True)
@@ -380,8 +383,8 @@ def main():
     if args.resume:
         params, old_cfg = load(args.resume)
         if resume_mismatches(old_cfg, cfg):
-            raise ValueError('Exact resume requires matching training configuration '
-                             '(except updates/epochs/logging/saving)')
+            raise ValueError('Resume requires matching training configuration '
+                             '(except lr, updates/epochs/logging/saving)')
         with np.load(args.resume, allow_pickle=False) as data:
             leaves, tree = jax.tree.flatten(opt_state)
             opt_state = jax.tree.unflatten(tree, [jnp.asarray(data[f'opt_{i}']) for i in range(len(leaves))])
