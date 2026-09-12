@@ -1,0 +1,23 @@
+{
+  "run_dir": "runs/a100_mixed_mlp_gelu_d4_v4_turnzero_from_u70000",
+  "model_prefix": "mlp_turnzero",
+  "first_update": 70500,
+  "last_update": 200000,
+  "interval": 500,
+  "lag": 4,
+  "games": 1024,
+  "heuristic_games": 384,
+  "max_decisions": 4000,
+  "seed": 20260922,
+  "bf16": true,
+  "bootstrap": 300,
+  "poll_seconds": 10,
+  "expected_training": {
+    "architecture": "mlp",
+    "mixed_players": true,
+    "gamma": 1.0,
+    "observation_version": 4,
+    "zero_turn_feature": true,
+    "lr": 2e-05
+  }
+}
