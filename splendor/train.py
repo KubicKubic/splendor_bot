@@ -51,6 +51,7 @@ class Config:
     transformer_heads: int = 4
     transformer_ff_dim: int = 384
     token_embed_width: int = 64
+    transformer_attention: str = 'dense'
     players: int = 2
     mixed_players: bool = False
     seed: int = 41
@@ -332,23 +333,24 @@ def main():
     if (any(getattr(cfg, name) <= 0 for name in ('envs', 'horizon', 'updates', 'epochs', 'minibatches', 'width', 'mlp_hidden_layers', 'max_turns', 'save_every', 'log_every'))
             or cfg.residual_blocks < 0 or cfg.value_head_width < 0 or cfg.value_head_layers < 0
             or cfg.policy_head_width < 0 or cfg.policy_head_layers < 0 or cfg.value_loss_coef < 0
-            or cfg.architecture not in ('mlp', 'transformer')
+            or cfg.architecture not in ('mlp', 'transformer', 'pooled_transformer')
             or cfg.mlp_activation not in ('relu', 'gelu')
-            or (cfg.architecture == 'transformer'
+            or (cfg.architecture in ('transformer', 'pooled_transformer')
                 and (min(cfg.transformer_layers, cfg.transformer_heads,
                          cfg.transformer_ff_dim, cfg.token_embed_width) <= 0
-                     or cfg.width % cfg.transformer_heads))
+                     or cfg.width % cfg.transformer_heads
+                     or cfg.transformer_attention not in ('dense', 'star')))
             or not 0. <= cfg.gamma <= 1. or not 0. <= cfg.gae_lambda <= 1.
             or bool(cfg.value_head_width) != bool(cfg.value_head_layers)
             or bool(cfg.policy_head_width) != bool(cfg.policy_head_layers)):
         parser.error('Invalid batch/model sizes, loss weights, gamma, or GAE lambda')
-    if cfg.architecture == 'transformer' and (cfg.residual_blocks or not cfg.value_head_width
+    if cfg.architecture in ('transformer', 'pooled_transformer') and (cfg.residual_blocks or not cfg.value_head_width
                                                or not cfg.policy_head_width
                                                or cfg.observation_version != 3):
         parser.error('Transformer requires residual_blocks=0 and explicit policy/value heads')
     if cfg.players not in (2, 3, 4) or cfg.envs * cfg.horizon % cfg.minibatches:
         parser.error('players must be 2..4; envs*horizon must divide by minibatches')
-    expected_observation = 3 if cfg.architecture == 'transformer' else env.OBSERVATION_VERSION
+    expected_observation = 3 if cfg.architecture in ('transformer', 'pooled_transformer') else env.OBSERVATION_VERSION
     if not args.resume and cfg.observation_version != expected_observation:
         parser.error(f'New {cfg.architecture} training must use observation version {expected_observation}')
     devices = jax.devices()
@@ -368,7 +370,7 @@ def main():
                               jnp.full(cfg.envs, cfg.players))
     states = jax.vmap(env.reset)(jax.random.split(ke, cfg.envs), player_counts)
     params = network.init_from_config(
-        kp, env.observe(jax.tree.map(lambda x: x[0], states)).shape[0], cfg)
+        kp, env.observe(jax.tree.map(lambda x: x[0], states), cfg.observation_version).shape[0], cfg)
     if args.warm_start:
         params, parent_cfg = load(args.warm_start)
         player_compatible = (parent_cfg.players == cfg.players or cfg.mixed_players)
@@ -376,7 +378,8 @@ def main():
             'mlp_hidden_layers', 'mlp_activation',
             'value_head_width', 'value_head_layers', 'policy_head_width', 'policy_head_layers',
             'residual_stage_widths', 'transformer_layers', 'transformer_heads',
-            'transformer_ff_dim', 'token_embed_width', 'observation_version')
+            'transformer_ff_dim', 'token_embed_width', 'transformer_attention',
+            'observation_version')
         if (not player_compatible or parent_cfg.width > cfg.width
                 or any(getattr(parent_cfg, name) != getattr(cfg, name) for name in architecture_fields)):
             raise ValueError('Warm-start requires compatible players, architecture, and non-shrinking width')

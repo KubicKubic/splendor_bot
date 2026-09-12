@@ -22,6 +22,7 @@ def _xavier(key, fan_in, fan_out, scale=1.):
 OBSERVATION_V3_DIM = 498
 TOKEN_COUNT = 47
 FUSED_ATTENTION_TOKEN_COUNT = 64
+POOLED_LATENT_COUNT = 8
 
 
 def structured_observation(obs):
@@ -82,31 +83,40 @@ def _init_mlp(key, fan_in, hidden, fan_out):
 
 def _init_transformer(key, obs_dim, model_dim, layers, heads, ff_dim, embed_width,
                       value_head_width, value_head_layers, policy_head_width,
-                      policy_head_layers):
+                      policy_head_layers, attention='dense'):
     if obs_dim != OBSERVATION_V3_DIM:
         raise ValueError('Typed-token Transformer only supports observation v3')
     if min(model_dim, layers, heads, ff_dim, embed_width) <= 0 or model_dim % heads:
         raise ValueError('Invalid Transformer dimensions or attention head count')
     if not value_head_width or not value_head_layers or not policy_head_width or not policy_head_layers:
         raise ValueError('Typed-token Transformer requires explicit policy/value heads')
+    if attention not in ('dense', 'star'):
+        raise ValueError(f'Unknown Transformer attention pattern {attention!r}')
 
     input_widths = dict(market=15, reserved=15, nobles=6, gems=7, discounts=6,
                         players=5, bank=6, decks=1, context=35)
-    key_count = len(input_widths) + 1 + layers * 4 + policy_head_layers + 1 + value_head_layers + 1
+    key_count = (len(input_widths) + 1 + layers * (4 + (attention == 'star'))
+                 + policy_head_layers + 1 + value_head_layers + 1)
     keys = iter(jax.random.split(key, key_count))
     embedders = {name: _init_mlp(next(keys), width, embed_width, model_dim)
                  for name, width in input_widths.items()}
     position_key = next(keys)
     transformer = []
     for _ in range(layers):
-        transformer.append(dict(
+        layer = dict(
             norm1=dict(scale=jnp.ones(model_dim), bias=jnp.zeros(model_dim)),
             qkv=_xavier(next(keys), model_dim, 3 * model_dim),
             projection=_xavier(next(keys), model_dim, model_dim),
             norm2=dict(scale=jnp.ones(model_dim), bias=jnp.zeros(model_dim)),
             ff1=_xavier(next(keys), model_dim, ff_dim),
             ff2=_xavier(next(keys), ff_dim, model_dim),
-        ))
+        )
+        # Star attention has one learned information-routing hub.  It attends
+        # over all semantic tokens then broadcasts its updated state back to
+        # them, retaining multi-hop token communication without T^2 attention.
+        if attention == 'star':
+            layer['broadcast'] = _xavier(next(keys), model_dim, model_dim)
+        transformer.append(layer)
     policy_layers = []
     width = model_dim
     for _ in range(policy_head_layers):
@@ -124,7 +134,8 @@ def _init_transformer(key, obs_dim, model_dim, layers, heads, ff_dim, embed_widt
         token_embedders=embedders,
         global_token=jax.random.normal(position_key, (1, model_dim)) * .02,
         positions=jax.random.normal(jax.random.fold_in(position_key, 1), (TOKEN_COUNT, model_dim)) * .02,
-        transformer_layers=transformer,
+        **({'star_transformer_layers': transformer} if attention == 'star'
+           else {'transformer_layers': transformer}),
         final_norm=dict(scale=jnp.ones(model_dim), bias=jnp.zeros(model_dim)),
         policy_layers=policy_layers,
         policy_out=policy_out,
@@ -134,11 +145,57 @@ def _init_transformer(key, obs_dim, model_dim, layers, heads, ff_dim, embed_widt
     )
 
 
+def _init_pooled_transformer(key, obs_dim, model_dim, layers, ff_dim, embed_width,
+                             value_head_width, value_head_layers, policy_head_width,
+                             policy_head_layers):
+    """Set Transformer pooling followed by a wide, GPU-efficient trunk."""
+    if obs_dim != OBSERVATION_V3_DIM:
+        raise ValueError('Pooled Set Transformer only supports observation v3')
+    if min(model_dim, layers, ff_dim, embed_width) <= 0:
+        raise ValueError('Invalid Pooled Set Transformer dimensions')
+    input_widths = dict(market=15, reserved=15, nobles=6, gems=7, discounts=6,
+                        players=5, bank=6, decks=1, context=35)
+    latent_layers = 2
+    key_count = (len(input_widths) + 1 + latent_layers * 4 + 1 + layers * 2
+                 + policy_head_layers + 1 + value_head_layers + 1)
+    keys = iter(jax.random.split(key, key_count))
+    embedders = {name: _init_mlp(next(keys), input_widths[name], embed_width, embed_width)
+                 for name in input_widths}
+    latent_queries = jax.random.normal(next(keys), (POOLED_LATENT_COUNT, embed_width)) * .02
+    latent_blocks = []
+    for _ in range(latent_layers):
+        latent_blocks.append(dict(
+            norm1=dict(scale=jnp.ones(embed_width), bias=jnp.zeros(embed_width)),
+            qkv=_xavier(next(keys), embed_width, 3 * embed_width),
+            projection=_xavier(next(keys), embed_width, embed_width),
+            norm2=dict(scale=jnp.ones(embed_width), bias=jnp.zeros(embed_width)),
+            ff1=_xavier(next(keys), embed_width, 2 * embed_width),
+            ff2=_xavier(next(keys), 2 * embed_width, embed_width),
+        ))
+    stem = _linear(next(keys), POOLED_LATENT_COUNT * embed_width, model_dim)
+    blocks = [dict(w1=_xavier(next(keys), model_dim, ff_dim)['w'],
+                   b1=jnp.zeros(ff_dim),
+                   w2=_xavier(next(keys), ff_dim, model_dim)['w'],
+                   b2=jnp.zeros(model_dim)) for _ in range(layers)]
+    policy_layers, width = [], model_dim
+    for _ in range(policy_head_layers):
+        policy_layers.append(_linear(next(keys), width, policy_head_width)); width = policy_head_width
+    policy_out = _linear(next(keys), width, N_ACTIONS); policy_out['w'] *= .01
+    value_layers, width = [], model_dim + 3 * embed_width
+    for _ in range(value_head_layers):
+        value_layers.append(_linear(next(keys), width, value_head_width)); width = value_head_width
+    return dict(token_embedders=embedders, latent_queries=latent_queries,
+                latent_blocks=latent_blocks, stem=stem, pooled_blocks=blocks, policy_layers=policy_layers,
+                policy_out=policy_out, value_layers=value_layers,
+                value_out=_linear(next(keys), width, 1, scale=.5))
+
+
 def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False,
          value_head_width=0, value_head_layers=0, policy_head_width=0,
          policy_head_layers=0, residual_stage_widths='', architecture='mlp',
          transformer_layers=4, transformer_heads=4, transformer_ff_dim=384,
-         token_embed_width=64, mlp_hidden_layers=2, mlp_activation='relu'):
+         token_embed_width=64, mlp_hidden_layers=2, mlp_activation='relu',
+         transformer_attention='dense'):
     """Initialize a flat MLP, a residual MLP, or the typed-token Transformer.
 
     Each residual block contains two affine transforms.  Tapered networks split
@@ -148,7 +205,13 @@ def init(key, obs_dim, width=256, residual_blocks=0, residual_taper=False,
     if architecture == 'transformer':
         return _init_transformer(key, obs_dim, width, transformer_layers, transformer_heads,
                                  transformer_ff_dim, token_embed_width, value_head_width,
-                                 value_head_layers, policy_head_width, policy_head_layers)
+                                 value_head_layers, policy_head_width, policy_head_layers,
+                                 transformer_attention)
+    if architecture == 'pooled_transformer':
+        return _init_pooled_transformer(key, obs_dim, width, transformer_layers,
+                                        transformer_ff_dim, token_embed_width,
+                                        value_head_width, value_head_layers,
+                                        policy_head_width, policy_head_layers)
     if architecture != 'mlp':
         raise ValueError(f'Unknown architecture {architecture!r}')
     if residual_blocks < 0:
@@ -241,7 +304,8 @@ def init_from_config(key, obs_dim, cfg):
                 cfg.value_head_width, cfg.value_head_layers, cfg.policy_head_width,
                 cfg.policy_head_layers, cfg.residual_stage_widths, cfg.architecture,
                 cfg.transformer_layers, cfg.transformer_heads, cfg.transformer_ff_dim,
-                cfg.token_embed_width, cfg.mlp_hidden_layers, cfg.mlp_activation)
+                cfg.token_embed_width, cfg.mlp_hidden_layers, cfg.mlp_activation,
+                cfg.transformer_attention)
 
 
 def _apply_affine(layer, x, dtype):
@@ -285,6 +349,38 @@ def _transformer_block(x, layer, valid, head_scale, dtype, attention_implementat
     return x * valid[..., None]
 
 
+def _star_transformer_block(x, layer, valid, head_scale, dtype):
+    """Linear-token-cost Transformer block with a global routing token.
+
+    The global token is a query over every valid public-information token.
+    Its updated representation is broadcast before the per-token FFN, letting
+    any two cards/players communicate through the hub once per layer.  This
+    avoids padding 47 tokens to a 64x64 dense attention matrix in PPO.
+    """
+    normalized = _layer_norm(layer['norm1'], x)
+    qkv = _apply_affine(layer['qkv'], normalized, dtype)
+    heads = head_scale.shape[0]
+    qkv = qkv.reshape(qkv.shape[:-1] + (3, heads, qkv.shape[-1] // (3 * heads)))
+    query = qkv[..., :1, 0, :, :] * head_scale.astype(dtype)[None, None, :, None]
+    key, value = qkv[..., 1, :, :], qkv[..., 2, :, :]
+    scores = jnp.einsum('bqhd,bkhd->bhqk', query, key).astype(jnp.float32)
+    scores = scores / jnp.sqrt(jnp.asarray(query.shape[-1], jnp.float32))
+    scores = jnp.where(valid[:, None, None, :], scores, -1e9)
+    weights = jax.nn.softmax(scores, axis=-1).astype(dtype)
+    attended = jnp.einsum('bhqk,bkhd->bqhd', weights, value)
+    attended = attended.reshape(attended.shape[:-2] + (attended.shape[-2] * attended.shape[-1],))
+    global_x = x[..., :1, :] + _apply_affine(layer['projection'], attended, dtype)
+    x = x.at[..., :1, :].set(global_x)
+
+    residual = x
+    normalized = _layer_norm(layer['norm2'], x)
+    hidden = jax.nn.gelu(_apply_affine(layer['ff1'], normalized, dtype))
+    x = residual + _apply_affine(layer['ff2'], hidden, dtype)
+    broadcast = _apply_affine(layer['broadcast'], global_x, dtype)
+    x = x.at[..., 1:, :].add(broadcast)
+    return x * valid[..., None]
+
+
 def _apply_transformer(params, obs, mask, bf16):
     dtype = jnp.bfloat16 if bf16 else jnp.float32
     unbatched = obs.ndim == 1
@@ -304,19 +400,26 @@ def _apply_transformer(params, obs, mask, bf16):
     # Rematerializing each block keeps the large PPO minibatch practical: only
     # block inputs are retained and attention/FF intermediates are recomputed.
     attention_implementation = 'cudnn' if bf16 and jax.default_backend() == 'gpu' else 'xla'
-    if attention_implementation == 'cudnn':
+    if attention_implementation == 'cudnn' and 'star_transformer_layers' not in params:
         # cuDNN flash attention on A100 accepts this head size at a 64-token
         # sequence boundary. The 17 padding tokens are never valid keys and do
         # not alter the model semantics or parameter count.
         padding = FUSED_ATTENTION_TOKEN_COUNT - TOKEN_COUNT
         x = jnp.pad(x, ((0, 0), (0, padding), (0, 0)))
         valid = jnp.pad(valid, ((0, 0), (0, padding)))
-    block = jax.checkpoint(
-        lambda tokens, layer, token_valid, head_scale:
-            _transformer_block(tokens, layer, token_valid, head_scale, dtype,
-                               attention_implementation))
-    for layer in params['transformer_layers']:
-        x = block(x, layer, valid, params['attention_head_scale'])
+    if 'star_transformer_layers' in params:
+        block = jax.checkpoint(
+            lambda tokens, layer, token_valid, head_scale:
+                _star_transformer_block(tokens, layer, token_valid, head_scale, dtype))
+        for layer in params['star_transformer_layers']:
+            x = block(x, layer, valid, params['attention_head_scale'])
+    else:
+        block = jax.checkpoint(
+            lambda tokens, layer, token_valid, head_scale:
+                _transformer_block(tokens, layer, token_valid, head_scale, dtype,
+                                   attention_implementation))
+        for layer in params['transformer_layers']:
+            x = block(x, layer, valid, params['attention_head_scale'])
     x = _layer_norm(params['final_norm'], x)
 
     policy_x = x[..., 0, :]
@@ -337,7 +440,60 @@ def _apply_transformer(params, obs, mask, bf16):
     return (logits[0], values[0]) if unbatched else (logits, values)
 
 
+def _apply_pooled_transformer(params, obs, mask, bf16):
+    """Attention-pool each semantic set, then reason in large dense matrices."""
+    dtype = jnp.bfloat16 if bf16 else jnp.float32
+    unbatched = obs.ndim == 1
+    if unbatched:
+        obs, mask = obs[None], mask[None]
+    inputs, valid = structured_observation(obs)
+    embedded, token_values = {}, []
+    for name in ('market', 'reserved', 'nobles', 'gems', 'discounts', 'players', 'bank', 'decks', 'context'):
+        value = _apply_embed(params['token_embedders'][name], inputs[name].astype(dtype), dtype)
+        embedded[name] = value
+        token_values.append(value)
+    token_values = jnp.concatenate(token_values, -2)
+    token_valid = valid[:, 1:]
+    # Eight learned queries extract distinct card/player relations from all
+    # 46 semantic tokens.  The following attention blocks communicate only
+    # among these eight latents, keeping the costly attention path tiny.
+    scores = jnp.einsum('ld,btd->blt', params['latent_queries'].astype(dtype), token_values).astype(jnp.float32)
+    scores = jnp.where(token_valid[:, None, :], scores, -1e9)
+    x = jnp.einsum('blt,btd->bld', jax.nn.softmax(scores, -1).astype(dtype), token_values)
+    heads, head_dim = 4, x.shape[-1] // 4
+    for layer in params['latent_blocks']:
+        residual = x
+        qkv = _apply_affine(layer['qkv'], _layer_norm(layer['norm1'], x), dtype)
+        qkv = qkv.reshape(qkv.shape[:-1] + (3, heads, head_dim))
+        query, key, value = [qkv[..., i, :, :] for i in range(3)]
+        logits = jnp.einsum('bqhd,bkhd->bhqk', query, key).astype(jnp.float32) / jnp.sqrt(head_dim)
+        attended = jnp.einsum('bhqk,bkhd->bqhd', jax.nn.softmax(logits, -1).astype(dtype), value)
+        attended = attended.reshape(attended.shape[:-2] + (attended.shape[-2] * attended.shape[-1],))
+        x = residual + _apply_affine(layer['projection'], attended, dtype)
+        residual = x
+        x = jax.nn.gelu(_apply_affine(layer['ff1'], _layer_norm(layer['norm2'], x), dtype))
+        x = residual + _apply_affine(layer['ff2'], x, dtype)
+    x = jax.nn.gelu(_apply_affine(params['stem'], x.reshape(x.shape[0], -1), dtype))
+    for block in params['pooled_blocks']:
+        residual = x
+        x = jax.nn.gelu(_apply_affine(dict(w=block['w1'], b=block['b1']), x, dtype))
+        x = residual + _apply_affine(dict(w=block['w2'], b=block['b2']), x, dtype)
+    policy_x = x
+    for layer in params['policy_layers']:
+        policy_x = jax.nn.gelu(_apply_affine(layer, policy_x, dtype))
+    logits = _apply_affine(params['policy_out'], policy_x, dtype).astype(jnp.float32)
+    global_x = jnp.broadcast_to(x[:, None, :], x.shape[:-1] + (4, x.shape[-1]))
+    value_x = jnp.concatenate((global_x, embedded['gems'], embedded['discounts'], embedded['players']), -1)
+    for layer in params['value_layers']:
+        value_x = jax.nn.gelu(_apply_affine(layer, value_x, dtype))
+    values = _apply_affine(params['value_out'], value_x, dtype)[..., 0].astype(jnp.float32)
+    logits = jnp.where(mask, logits, -1e9)
+    return (logits[0], values[0]) if unbatched else (logits, values)
+
+
 def apply(params, obs, mask, bf16=False):
+    if isinstance(params, dict) and 'pooled_blocks' in params:
+        return _apply_pooled_transformer(params, obs, mask, bf16)
     if isinstance(params, dict) and 'token_embedders' in params:
         return _apply_transformer(params, obs, mask, bf16)
     dtype = jnp.bfloat16 if bf16 else jnp.float32
