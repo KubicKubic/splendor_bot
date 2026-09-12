@@ -27,11 +27,13 @@ def atomic_json(path, data):
     os.replace(temp, path)
 
 
-def make_match(games=2048, max_decisions=4000, bf16=True, observation_versions=None):
+def make_match(games=2048, max_decisions=4000, bf16=True, observation_versions=None,
+               zero_turn_features=None):
     if games < 4 or games % 2:
         raise ValueError('games must be even and >= 4 for paired deals')
 
     versions = observation_versions or (env.OBSERVATION_VERSION, env.OBSERVATION_VERSION)
+    zero_turn_features = zero_turn_features or (False, False)
 
     def match(params_a, params_b, seed):
         key, deal_key = jax.random.split(jax.random.PRNGKey(seed))
@@ -43,8 +45,8 @@ def make_match(games=2048, max_decisions=4000, bf16=True, observation_versions=N
             s, rng, count = carry
             rng, action_key = jax.random.split(rng)
             mask = env.batch_mask(s)
-            obs_a = env.batch_observe_for_version(s, versions[0])
-            obs_b = env.batch_observe_for_version(s, versions[1])
+            obs_a = env.batch_observe_for_version(s, versions[0], zero_turn_features[0])
+            obs_b = env.batch_observe_for_version(s, versions[1], zero_turn_features[1])
             logits_a, _ = network.apply(params_a, obs_a, mask, bf16)
             logits_b, _ = network.apply(params_b, obs_b, mask, bf16)
             logits = jnp.where((s.player == seat_a)[:, None], logits_a, logits_b)
@@ -229,7 +231,8 @@ def main():
                 seed = manifest['seed'] + 1009 * a + 9176 * b
                 run = make_match(manifest.get('games', 2048), manifest.get('max_decisions', 4000),
                                  manifest.get('bf16', True),
-                                 (configs[a].observation_version, configs[b].observation_version))
+                                 (configs[a].observation_version, configs[b].observation_version),
+                                 (configs[a].zero_turn_feature, configs[b].zero_turn_feature))
                 result = jax.device_get(run(loaded[a], loaded[b], seed))
                 temp = path.with_suffix('.tmp.npz')
                 np.savez(temp, **result)
