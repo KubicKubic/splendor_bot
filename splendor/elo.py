@@ -55,9 +55,14 @@ def make_match(games=2048, max_decisions=4000, bf16=True, observation_versions=N
             body, (states, key, jnp.int32(0)))
         winners = jax.vmap(env.winners)(states)
         own = jnp.take_along_axis(winners, seat_a[:, None], -1)[:, 0]
-        score = own / jnp.maximum(winners.sum(-1), 1)
+        # A public turn-cap result is defined by the game as a neutral draw.
+        # `winners` is deliberately all false in that state, so it must not
+        # fall through to the zero score used for a non-winning terminal seat.
+        score = jnp.where(states.truncated, .5,
+                          own / jnp.maximum(winners.sum(-1), 1))
         return dict(score=score, done=states.done, seat_a=seat_a, turns=states.turns,
-                    decisions_executed=steps, final_scores=states.scores[:, :2])
+                    truncated=states.truncated, decisions_executed=steps,
+                    final_scores=states.scores[:, :2])
     return jax.jit(match)
 
 
@@ -100,6 +105,7 @@ def fit_elo(nmodels, pairs, wins, totals, anchor, anchor_elo=1000.):
 def match_summary(result):
     score = np.asarray(result['score'])
     done = np.asarray(result['done'], bool)
+    truncated = np.asarray(result.get('truncated', np.zeros_like(done)), bool)
     n = len(score)
     completed = int(done.sum())
     if not completed:
@@ -115,6 +121,7 @@ def match_summary(result):
     boot = cluster_score[indices].sum(1) / np.maximum(counts, 1)
     ci = np.percentile(boot[counts > 0], [2.5, 97.5]).tolist()
     return dict(games=n, completed=completed, unfinished=n - completed,
+        environment_truncations=int(truncated.sum()),
         a_wins=wins, draws=draws, b_wins=completed - wins - draws,
         a_score_completed=float(score[done].mean()),
         a_score_ci95=ci,

@@ -27,9 +27,11 @@ def test_elo_sweeps_finite_and_disconnected_rejected():
 
 def test_match_accounting_excludes_timeouts_and_counts_ties():
     result = dict(score=np.array([1., .5, 0., 0.]), done=np.array([True, True, True, False]),
+                  truncated=np.array([False, True, False, False]),
                   seat_a=np.array([0, 0, 1, 1]), turns=np.array([50, 60, 40, 100]), decisions_executed=4000)
     s = match_summary(result)
     assert (s['a_wins'], s['draws'], s['b_wins'], s['unfinished']) == (1, 1, 1, 1)
+    assert s['environment_truncations'] == 1
     assert s['a_score_completed'] == .5
     assert s['a_score_all_bounds'] == [.375, .625]
 

@@ -60,9 +60,11 @@ def make_evaluate(cfg, games, max_decisions, opponent, deterministic=False, play
         states, _ = jax.lax.fori_loop(0, max_decisions, body, (states, key))
         wins = jax.vmap(env.winners)(states)
         own = jnp.take_along_axis(wins, seats[:, None], -1)[:, 0]
-        credit = own / jnp.maximum(wins.sum(-1), 1)
+        credit = jnp.where(states.truncated, 1. / players,
+                           own / jnp.maximum(wins.sum(-1), 1))
         return dict(done=states.done, credit=credit, sole_win=own & (wins.sum(-1) == 1),
-                    tie=own & (wins.sum(-1) > 1), scores=states.scores, turns=states.turns, seats=seats)
+                    tie=own & (wins.sum(-1) > 1), truncated=states.truncated,
+                    scores=states.scores, turns=states.turns, seats=seats)
     return jax.jit(evaluate)
 
 
@@ -93,7 +95,8 @@ def main():
     credit = result['credit']
     done = result['done']
     report = dict(checkpoint=args.checkpoint, opponent=args.opponent, games=args.games, seed=args.seed,
-        deterministic=args.deterministic, untrained=args.untrained, completed=int(done.sum()), truncated=int((~done).sum()),
+        deterministic=args.deterministic, untrained=args.untrained, completed=int(done.sum()),
+        unfinished=int((~done).sum()), environment_truncations=int(result['truncated'].sum()),
         wins=int(result['sole_win'].sum()), ties=int(result['tie'].sum()),
         win_credit_all_games=float(credit.mean()), standard_error=float(credit.std(ddof=1) / np.sqrt(args.games)),
         completed_win_credit=float(credit[done].mean()) if done.any() else None,

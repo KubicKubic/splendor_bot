@@ -54,9 +54,10 @@ def make_match(games=2048, max_decisions=4000, bf16=True,
             body, (states, returns, key, jnp.int32(0), jnp.int32(0)))
         winners = jax.vmap(env.winners)(states)
         own = jnp.take_along_axis(winners, model_seat[:, None], -1)[:, 0]
-        score = own / jnp.maximum(winners.sum(-1), 1)
+        score = jnp.where(states.truncated, .5,
+                          own / jnp.maximum(winners.sum(-1), 1))
         return dict(score=score, done=states.done, seat_a=model_seat,
-                    turns=states.turns, decisions_executed=steps,
+                    turns=states.turns, truncated=states.truncated, decisions_executed=steps,
                     final_scores=states.scores[:, :2], bot_invalid_actions=invalid,
                     bot_return_tokens=returns.sum())
     return jax.jit(match)
