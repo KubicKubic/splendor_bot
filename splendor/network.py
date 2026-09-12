@@ -321,14 +321,17 @@ def _apply_transformer(params, obs, mask, bf16):
 
     policy_x = x[..., 0, :]
     for layer in params['policy_layers']:
-        policy_x = jax.nn.relu(_apply_affine(layer, policy_x, dtype))
+        # GELU keeps the Transformer heads smooth around zero.  In particular,
+        # unlike ReLU it does not permanently discard a token interaction just
+        # because its initially small policy/value feature is negative.
+        policy_x = jax.nn.gelu(_apply_affine(layer, policy_x, dtype))
     logits = _apply_affine(params['policy_out'], policy_x, dtype).astype(jnp.float32)
 
     # Token offsets: CLS 0, market 1:13, reserve 13:25, noble 25:30,
     # gems 30:34, discounts 34:38, player summaries 38:42.
     value_x = jnp.concatenate((x[..., 38:42, :], x[..., 30:34, :], x[..., 34:38, :]), -1)
     for layer in params['value_layers']:
-        value_x = jax.nn.relu(_apply_affine(layer, value_x, dtype))
+        value_x = jax.nn.gelu(_apply_affine(layer, value_x, dtype))
     values = _apply_affine(params['value_out'], value_x, dtype)[..., 0].astype(jnp.float32)
     logits = jnp.where(mask, logits, -1e9)
     return (logits[0], values[0]) if unbatched else (logits, values)
